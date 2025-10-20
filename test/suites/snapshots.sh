@@ -498,7 +498,7 @@ test_snap_multi_volume() {
   lxc start c1
   lxc config show c1/c1-snap0
 
-  # Attach volumes for multi-volume snapshot.
+  # Attach volumes for multi-volume snapshot. 
   lxc storage volume create "${poolName}" non-shared
   lxc storage volume create "${poolName}" shared
   lxc storage volume attach "${poolName}" shared c1 /mnt/shared
