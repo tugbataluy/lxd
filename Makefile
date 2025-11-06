@@ -89,6 +89,11 @@ lxd-migrate:
 	CGO_ENABLED=0 go install -v -trimpath $(COVER) -tags netgo ./lxd-migrate
 	@echo "$@ built successfully"
 
+.PHONY: lxd-convert
+lxd-convert:
+	CGO_ENABLED=0 go install -v -trimpath $(COVER) -tags netgo ./lxd-convert
+	@echo "$@ built successfully"
+
 .PHONY: devlxd-client
 devlxd-client:
 	CGO_ENABLED=0 go install -C test -v -trimpath -buildvcs=false $(COVER) -tags netgo ./devlxd-client
@@ -354,6 +359,7 @@ endif
 	CC="$(CC)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" go install -v -tags "$(TAG_SQLITE3) logdebug" $(DEBUG) ./...
 	CGO_ENABLED=0 go install -v -trimpath -tags "netgo,logdebug" ./lxd-migrate
 	CGO_ENABLED=0 go install -v -trimpath -tags "agent,netgo,logdebug" ./lxd-agent
+	CGO_ENABLED=0 go install -v -trimpath -tags "netgo,logdebug" ./lxd-convert
 	@echo "LXD built successfully"
 
 .PHONY: check
