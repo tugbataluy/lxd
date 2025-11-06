@@ -48,7 +48,7 @@ default: all
 build: lxd
 
 .PHONY: all
-all: client lxd lxd-agent lxd-benchmark lxd-metadata lxd-migrate lxd-user test-binaries
+all: client lxd lxd-agent lxd-benchmark lxd-convert lxd-metadata lxd-migrate lxd-user test-binaries
 
 .PHONY: lxd
 lxd:
@@ -87,6 +87,11 @@ lxd-metadata:
 .PHONY: lxd-migrate
 lxd-migrate:
 	CGO_ENABLED=0 go install -v -trimpath $(COVER) -tags netgo ./lxd-migrate
+	@echo "$@ built successfully"
+
+.PHONY: lxd-convert
+lxd-convert:
+	CGO_ENABLED=0 go install -v -trimpath $(COVER) -tags netgo ./lxd-convert
 	@echo "$@ built successfully"
 
 .PHONY: devlxd-client
@@ -339,6 +344,7 @@ endif
 	CC="$(CC)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" go install -v -tags "$(TAG_SQLITE3) logdebug" $(DEBUG) ./...
 	CGO_ENABLED=0 go install -v -trimpath -tags "netgo,logdebug" ./lxd-migrate
 	CGO_ENABLED=0 go install -v -trimpath -tags "agent,netgo,logdebug" ./lxd-agent
+	CGO_ENABLED=0 go install -v -trimpath -tags "netgo,logdebug" ./lxd-convert
 	@echo "LXD built successfully"
 
 .PHONY: check
