@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -1104,18 +1105,37 @@ func (c *cmdStorageVolumeEdit) run(cmd *cobra.Command, args []string) error {
 		}
 
 		if isSnapshot {
+			// For snapshots, we need to parse and validate the input
 			newdata := api.StorageVolumeSnapshotPut{}
 			err = yaml.Unmarshal(contents, &newdata)
 			if err != nil {
 				return err
 			}
 
-			err := client.UpdateStoragePoolVolumeSnapshot(resource.name, volType, fields[0], fields[1], newdata, "")
+			// Get the current snapshot data for validation
+			snapVol, etag, err := client.GetStoragePoolVolumeSnapshot(resource.name, volType, fields[0], fields[1])
 			if err != nil {
 				return err
 			}
 
-			return nil
+			// Create a temporary snapshot to validate the changes
+			var check api.StorageVolumeSnapshot
+			err = yaml.Unmarshal(contents, &check)
+			if err != nil {
+				return fmt.Errorf(i18n.G("Failed to parse edited content: %w"), err)
+			}
+
+			// Create a copy of the original snapshot with only writable fields changed
+			expectedVol := *snapVol
+			expectedVol.SetWritable(newdata)
+
+			// Validate that only writable fields were modified
+			if !reflect.DeepEqual(check, expectedVol) {
+				return fmt.Errorf("%s", i18n.G("Only 'description' and 'expires_at' fields can be modified for snapshot volumes"))
+			}
+
+			// Update the snapshot with the new data
+			return client.UpdateStoragePoolVolumeSnapshot(resource.name, volType, fields[0], fields[1], newdata, etag)
 		}
 
 		newdata := api.StorageVolumePut{}
@@ -1137,7 +1157,6 @@ func (c *cmdStorageVolumeEdit) run(cmd *cobra.Command, args []string) error {
 	var vol *api.StorageVolume
 	etag := ""
 	if isSnapshot {
-		// Extract the current value
 		snapVol, etag, err = client.GetStoragePoolVolumeSnapshot(resource.name, volType, fields[0], fields[1])
 		if err != nil {
 			return err
@@ -1172,6 +1191,34 @@ func (c *cmdStorageVolumeEdit) run(cmd *cobra.Command, args []string) error {
 			newdata := api.StorageVolumeSnapshotPut{}
 			err = yaml.Unmarshal(content, &newdata)
 			if err == nil {
+				// Validation: Check if user tried to modify read-only fields
+				var check api.StorageVolumeSnapshot
+				err = yaml.Unmarshal(content, &check)
+				if err != nil {
+					return fmt.Errorf(i18n.G("Failed to parse edited content: %w"), err)
+				}
+
+				// Create a copy of the original snapshot with only writable fields changed
+				expectedVol := *snapVol
+				expectedVol.SetWritable(newdata)
+
+				// Compare if the user tried to modify anything beyond writable fields
+				if !reflect.DeepEqual(check, expectedVol) {
+					fmt.Fprintf(os.Stderr, "%s", i18n.G("Error: Only 'description' and 'expires_at' fields can be modified for snapshot volumes")+"\n")
+					fmt.Println(i18n.G("Press enter to open the editor again or ctrl+c to abort change"))
+					_, err := os.Stdin.Read(make([]byte, 1))
+					if err != nil {
+						return err
+					}
+
+					content, err = shared.TextEditor("", content)
+					if err != nil {
+						return err
+					}
+
+					continue
+				}
+
 				err = client.UpdateStoragePoolVolumeSnapshot(resource.name, volType, fields[0], fields[1], newdata, etag)
 			}
 
