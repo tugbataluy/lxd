@@ -109,10 +109,19 @@ func (d *zfs) datasetExists(dataset string) (bool, error) {
 }
 
 func (d *zfs) deleteDatasetRecursive(dataset string) error {
+	// First, check if the dataset exists
+	exists, err := d.datasetExists(dataset)
+	if err != nil || !exists {
+		// Dataset doesn't exist or we can't check, nothing to do
+		return nil
+	}
+
 	// Locate the origin snapshot (if any).
 	origin, err := d.getDatasetProperty(dataset, "origin")
 	if err != nil {
-		return err
+		// If we can't get the origin property, just delete the dataset and exit
+		_, _ = shared.TryRunCommand("zfs", "destroy", "-r", dataset)
+		return nil
 	}
 
 	// Delete the dataset (and any snapshots left).
@@ -123,34 +132,90 @@ func (d *zfs) deleteDatasetRecursive(dataset string) error {
 
 	// Check if the origin can now be deleted.
 	if origin != "" && origin != "-" {
-		if strings.HasPrefix(origin, d.config["zfs.pool_name"]+"/deleted") {
-			// Strip the snapshot name when dealing with a deleted volume.
-			dataset, _, _ = strings.Cut(origin, "@")
-		} else if strings.Contains(origin, "@deleted-") || strings.Contains(origin, "@copy-") {
-			// Handle deleted snapshots.
-			dataset = origin
-		} else {
-			// Origin is still active.
-			dataset = ""
+		// Only handle copy snapshots (from instance copies)
+		if strings.Contains(origin, "@copy-") {
+			d.cleanupCopySnapshot(origin)
 		}
+	}
 
-		if dataset != "" {
-			// Get all clones.
-			clones, err := d.getClones(dataset)
-			if err != nil {
-				return err
-			}
+	return nil
+}
 
-			if len(clones) == 0 {
-				// Delete the origin.
-				err = d.deleteDatasetRecursive(dataset)
-				if err != nil {
-					return err
-				}
+// cleanupCopySnapshot tries to clean up a copy snapshot if it exists and has no clones
+func (d *zfs) cleanupCopySnapshot(snapshotPath string) {
+	// Check if snapshot exists at the given path
+	exists, err := d.datasetExists(snapshotPath)
+	if err == nil && exists {
+		// Snapshot exists at original location
+		clones, err := d.getClones(snapshotPath)
+		if err == nil && len(clones) == 0 {
+			_, _ = shared.TryRunCommand("zfs", "destroy", snapshotPath)
+		}
+		return
+	}
+	
+	// Snapshot might be in deleted directory
+	// Only search if it's a container or VM snapshot
+	if strings.Contains(snapshotPath, "/containers/") || strings.Contains(snapshotPath, "/virtual-machines/") {
+		foundSnapshot, found := d.findCopySnapshotInDeletedInstances(snapshotPath)
+		if found {
+			clones, err := d.getClones(foundSnapshot)
+			if err == nil && len(clones) == 0 {
+				_, _ = shared.TryRunCommand("zfs", "destroy", foundSnapshot)
 			}
 		}
 	}
-	return nil
+}
+
+// findCopySnapshotInDeletedInstances searches for a copy snapshot in deleted instances.
+func (d *zfs) findCopySnapshotInDeletedInstances(snapshotPath string) (string, bool) {
+	// Parse the snapshot path.
+	parts := strings.Split(snapshotPath, "@")
+	if len(parts) != 2 {
+		return "", false
+	}
+
+	baseDataset, snapshotName := parts[0], parts[1]
+
+	// Check if this is a container or VM snapshot.
+	isContainer := strings.Contains(baseDataset, "/containers/")
+	isVM := strings.Contains(baseDataset, "/virtual-machines/")
+
+	if !isContainer && !isVM {
+		return "", false
+	}
+
+	// Extract pool name.
+	pool := d.config["zfs.pool_name"]
+
+	// Search in both deleted containers and virtual-machines
+	deletedTypes := []string{"containers", "virtual-machines"}
+
+	for _, volType := range deletedTypes {
+		deletedPath := pool + "/deleted/" + volType
+
+		// Get all deleted instances of this type.
+		deletedInstances, err := d.getDatasets(deletedPath, "filesystem,volume")
+		if err != nil {
+			continue
+		}
+
+		for _, instance := range deletedInstances {
+			if instance == "" {
+				continue
+			}
+
+			fullDeletedPath := deletedPath + instance
+			potentialSnapshot := fullDeletedPath + "@" + snapshotName
+
+			exists, err := d.datasetExists(potentialSnapshot)
+			if err == nil && exists {
+				return potentialSnapshot, true
+			}
+		}
+	}
+
+	return "", false
 }
 
 func (d *zfs) getClones(dataset string) ([]string, error) {
