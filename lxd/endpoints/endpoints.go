@@ -64,9 +64,6 @@ type Config struct {
 	// HTTP server handling requests for the LXD metrics API.
 	MetricsServer *http.Server
 
-	// HTTP server handling requests for the LXD storage buckets API.
-	StorageBucketsServer *http.Server
-
 	// HTTP server handling requests from VMs via the vsock.
 	VsockServer *http.Server
 
@@ -181,7 +178,6 @@ func (e *Endpoints) up(config *Config) error {
 		cluster:        config.RestServer,
 		pprof:          pprofCreateServer(),
 		metrics:        config.MetricsServer,
-		storageBuckets: config.StorageBucketsServer,
 		vmvsock:        config.VsockServer,
 	}
 
@@ -327,19 +323,6 @@ func (e *Endpoints) UpMetrics(listenAddress string) error {
 	return nil
 }
 
-// UpStorageBuckets brings up storage buvkets listener on specified address.
-func (e *Endpoints) UpStorageBuckets(listenAddress string) error {
-	var err error
-	e.listeners[storageBuckets], err = storageBucketsCreateListener(listenAddress, e.cert)
-	if err != nil {
-		return fmt.Errorf("Failed starting storage buckets listener: %w", err)
-	}
-
-	e.serve(storageBuckets)
-
-	return nil
-}
-
 // Down brings down all endpoints and stops serving HTTP requests.
 func (e *Endpoints) Down() error {
 	e.mu.Lock()
@@ -380,13 +363,6 @@ func (e *Endpoints) Down() error {
 
 	if e.listeners[metrics] != nil {
 		err := e.closeListener(metrics)
-		if err != nil {
-			return err
-		}
-	}
-
-	if e.listeners[storageBuckets] != nil {
-		err := e.closeListener(storageBuckets)
 		if err != nil {
 			return err
 		}
@@ -489,7 +465,6 @@ const (
 	cluster
 	metrics
 	vmvsock
-	storageBuckets
 )
 
 // Human-readable descriptions of the various kinds of endpoints.
@@ -501,5 +476,4 @@ var descriptions = map[kind]string{
 	cluster:        "cluster socket",
 	metrics:        "metrics socket",
 	vmvsock:        "VM socket",
-	storageBuckets: "Storage buckets socket",
 }
