@@ -66,7 +66,6 @@ import (
 	"github.com/canonical/lxd/lxd/state"
 	storageDrivers "github.com/canonical/lxd/lxd/storage/drivers"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
-	"github.com/canonical/lxd/lxd/storage/s3/miniod"
 	"github.com/canonical/lxd/lxd/sys"
 	"github.com/canonical/lxd/lxd/task"
 	"github.com/canonical/lxd/lxd/ubuntupro"
@@ -1472,7 +1471,6 @@ func (d *Daemon) init() error {
 		ClusterAddress:       localClusterAddress,
 		DebugAddress:         debugAddress,
 		MetricsServer:        metricsServer(d),
-		StorageBucketsServer: storageBucketsServer(d),
 		VsockServer:          vSockServer(d),
 		VsockSupport:         false,
 	}
@@ -1838,14 +1836,6 @@ func (d *Daemon) init() error {
 		}
 	}
 
-	storageBucketsAddress := d.localConfig.StorageBucketsAddress()
-	if storageBucketsAddress != "" {
-		err = d.endpoints.UpStorageBuckets(storageBucketsAddress)
-		if err != nil {
-			return err
-		}
-	}
-
 	// Apply all patches that need to be run after networks are initialised.
 	err = patchesApply(d, patchPostNetworks)
 	if err != nil {
@@ -2181,9 +2171,6 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 			d.gateway.Kill()
 		}
 	}
-
-	// Stop any running minio processes cleanly before unmount storage pools.
-	miniod.StopAll()
 
 	var err error
 	var instances []instance.Instance
