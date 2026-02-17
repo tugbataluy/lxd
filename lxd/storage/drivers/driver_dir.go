@@ -50,7 +50,7 @@ func (d *dir) Info() Info {
 		DirectIO:                     true,
 		IOUring:                      true,
 		MountedRoot:                  true,
-		Buckets:                      true,
+		Buckets:                      false,
 		PopulateParentVolumeUUID:     false,
 	}
 }

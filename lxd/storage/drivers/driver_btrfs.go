@@ -105,7 +105,7 @@ func (d *btrfs) Info() Info {
 		DirectIO:                     true,
 		IOUring:                      true,
 		MountedRoot:                  true,
-		Buckets:                      true,
+		Buckets:                      false,
 		PopulateParentVolumeUUID:     false,
 	}
 }
