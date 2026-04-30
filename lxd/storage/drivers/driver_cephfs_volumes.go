@@ -67,11 +67,6 @@ func (d *cephfs) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, s
 	return genericVFSBackupUnpack(d, d.state, vol, srcBackup.Snapshots, srcData, progressReporter)
 }
 
-// CreateVolumeFromImage creates a new volume from an image, unpacking it directly.
-func (d *cephfs) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
-	return d.CreateVolume(vol, filler, progressReporter)
-}
-
 // CreateVolumeFromCopy copies an existing storage volume (with or without snapshots) into a new volume.
 func (d *cephfs) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, progressReporter ioprogress.ProgressReporter) error {
 	bwlimit := d.config["rsync.bwlimit"]
