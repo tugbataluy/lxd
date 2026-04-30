@@ -137,11 +137,6 @@ func (d *dir) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, srcD
 	return nil, revertHook, nil
 }
 
-// CreateVolumeFromImage creates a new volume from an image, unpacking it directly.
-func (d *dir) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
-	return d.CreateVolume(vol, filler, progressReporter)
-}
-
 // CreateVolumeFromCopy provides same-pool volume copying functionality.
 func (d *dir) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, progressReporter ioprogress.ProgressReporter) error {
 	var srcSnapshots []string
