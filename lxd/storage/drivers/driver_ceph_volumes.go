@@ -751,11 +751,6 @@ func (d *ceph) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser
 	return nil
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *ceph) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
-	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
-}
-
 // refreshVolume updates an existing volume to match the state of another.
 // It returns the cleanup hooks required to revert any changes made during the refresh.
 func (d *ceph) refreshVolume(vol VolumeCopy, srcVol VolumeCopy, refreshSnapshots []string, allowInconsistent bool, progressReporter ioprogress.ProgressReporter) (revert.Hook, error) {
