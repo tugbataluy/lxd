@@ -2178,30 +2178,25 @@ func (b *lxdBackend) CreateInstanceFromImage(ctx context.Context, inst instance.
 		Fill:        b.imageFiller(fingerprint, progressReporter, inst.Project().Name),
 	}
 
-	// For drivers with optimised images, the cached image must exist before the
-	// instance volume can be cloned from it. Pass inst so variant-capable drivers
-	// can also ensure the variant matching the instance's effective config exists.
-	// Drivers that cannot serve a non-default config from the cached image fall
-	// back to a direct unpack inside CreateVolumeFromImage.
+	// For drivers with optimised images, EnsureImage returns the cached image artifact
+	// matching the instance's effective config (a per-config variant when the driver
+	// supports them, otherwise the pool-default volume). Drivers without optimised
+	// images return nil and the instance is unpacked directly below.
 	var imgVol *drivers.Volume
 	if b.driver.Info().OptimizedImages {
-		err = b.EnsureImage(ctx, fingerprint, inst.Project().Name, inst, progressReporter)
+		imgVol, err = b.EnsureImage(ctx, fingerprint, inst.Project().Name, inst, progressReporter)
 		if err != nil {
 			return err
 		}
-
-		imgDBVol, err := VolumeDBGet(b, api.ProjectDefaultName, fingerprint, drivers.VolumeTypeImage)
-		if err != nil {
-			return err
-		}
-
-		v := b.GetVolume(drivers.VolumeTypeImage, contentType, fingerprint, imgDBVol.Config)
-		imgVol = &v
 	}
 
-	// The driver decides whether to clone from the cached image volume or unpack
-	// directly, based on whether imgVol is set and config/size constraints.
-	err = b.driver.CreateVolumeFromImage(vol, imgVol, &volFiller, progressReporter)
+	// Dispatch the per-volume primitive. When the cached image's effective config can
+	// serve the target volume we clone from it; otherwise (no cached image, or its
+	// config/size cannot be reused) we unpack directly. This was previously handled
+	// inside the driver's CreateVolumeFromImage; making the choice here keeps the
+	// driver interface to two primitives (CreateVolume + CreateVolumeFromCopy) and
+	// removes the variant-aware dispatch branch from each driver.
+	err = b.createInstanceVolumeFromImage(vol, imgVol, &volFiller, progressReporter)
 	if err != nil {
 		return err
 	}
@@ -2218,6 +2213,52 @@ func (b *lxdBackend) CreateInstanceFromImage(ctx context.Context, inst instance.
 
 	revert.Success()
 	return nil
+}
+
+// createInstanceVolumeFromImage clones the instance volume from the cached image volume when
+// possible, otherwise unpacks the image directly via filler. The dispatch logic was previously
+// the driver-level helper drivers.createVolumeFromImage; lifting it into the backend lets each
+// driver expose only the two primitive operations CreateVolume and CreateVolumeFromCopy.
+func (b *lxdBackend) createInstanceVolumeFromImage(vol drivers.Volume, imgVol *drivers.Volume, filler *drivers.VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+	// No cached image (driver doesn't support optimised images, or EnsureImage opted out):
+	// unpack the image directly into the new volume.
+	if imgVol == nil {
+		return b.driver.CreateVolume(vol, filler, progressReporter)
+	}
+
+	// For drivers without per-config image variants the cached image is keyed on pool
+	// defaults; if the target volume's effective config (pool defaults plus initial.*
+	// overrides) needs a different filesystem or block-backing mode the cached image
+	// cannot serve it, so fall back to a direct unpack. Variant-capable drivers skip
+	// this check: EnsureImage already resolved the variant matching the instance's
+	// effective config and materialised it on disk.
+	if !b.driver.Info().HasImageVariants && !b.driver.ImageVolumeConfigMatch(*imgVol, vol) {
+		return b.driver.CreateVolume(vol, filler, progressReporter)
+	}
+
+	// Derive the volume size to use when copying from the image volume. Where possible (if
+	// the image volume has a volatile.rootfs.size property), this checks that the image
+	// volume isn't larger than the volume's "size" or the pool's "volume.size" setting.
+	newVolSize, err := vol.ConfigSizeFromSource(*imgVol)
+	if err != nil {
+		return err
+	}
+
+	vol.SetConfigSize(newVolSize)
+
+	err = b.driver.CreateVolumeFromCopy(drivers.NewVolumeCopy(vol), drivers.NewVolumeCopy(*imgVol), false, progressReporter)
+	if err == nil {
+		return nil
+	}
+
+	if !errors.Is(err, drivers.ErrCannotBeShrunk) {
+		return err
+	}
+
+	// The cached image volume is larger than the requested new volume size and cannot
+	// be shrunk. Fall back to unpacking the image directly. This is slower but allows
+	// creating volumes smaller than the pool's default size.
+	return b.driver.CreateVolume(vol, filler, progressReporter)
 }
 
 // CreateInstanceFromMigration receives an instance being migrated.
@@ -2479,7 +2520,7 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 				// path does not exercise the per-instance variant logic so inst is left
 				// nil; any non-default variant required for the target instance is
 				// produced by the existing lazy-creation path.
-				err = b.EnsureImage(ctx, preFiller.Fingerprint, inst.Project().Name, nil, progressReporter)
+				_, err = b.EnsureImage(ctx, preFiller.Fingerprint, inst.Project().Name, nil, progressReporter)
 				if err != nil {
 					return err
 				}
@@ -4182,18 +4223,23 @@ func (b *lxdBackend) UnmountInstanceSnapshot(inst instance.Instance, progressRep
 // When inst is non-nil and its effective volume config differs from the pool defaults, an additional on-disk
 // image variant matching the instance's config is ensured for drivers that maintain per-config variants
 // (e.g. ZFS). The DB record continues to reflect pool defaults; no per-variant DB row is written.
-func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projectName string, inst instance.Instance, progressReporter ioprogress.ProgressReporter) error {
+//
+// On success the returned Volume is the cached image artifact the caller should use as the clone source: the
+// per-instance variant when one was materialised, otherwise the pool-default image volume. Returns (nil, nil)
+// when the driver does not support optimised images, in which case the caller must fall back to a direct
+// image unpack.
+func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projectName string, inst instance.Instance, progressReporter ioprogress.ProgressReporter) (*drivers.Volume, error) {
 	l := b.logger.AddContext(logger.Ctx{"fingerprint": fingerprint})
 	l.Debug("EnsureImage started")
 	defer l.Debug("EnsureImage finished")
 
 	err := b.isStatusReady()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if !b.driver.Info().OptimizedImages {
-		return nil // Nothing to do for drivers that do not support optimized images volumes.
+		return nil, nil // Nothing to do for drivers that do not support optimized images volumes.
 	}
 
 	// We need to lock this operation to ensure that the image is not being created multiple times.
@@ -4201,7 +4247,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 	// establishes a lock on the volume type & name if it needs to mount the volume before filling.
 	unlock, err := locking.Lock(context.TODO(), drivers.OperationLockName("EnsureImage", b.name, drivers.VolumeTypeImage, "", fingerprint))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer unlock()
@@ -4215,7 +4261,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 		return err
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Derive content type from image type. Image types are not the same as instance types, so don't use
@@ -4226,10 +4272,48 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 		contentType = drivers.ContentTypeBlock
 	}
 
+	// maybeEnsureVariant resolves the cached image artefact the caller should clone from for the
+	// supplied instance. For drivers that maintain per-config image variants on disk (ZFS) it
+	// idempotently materialises the dataset matching the instance's effective config and returns
+	// it. CreateVolume for VolumeTypeImage on variant-capable drivers is idempotent: it skips when
+	// the specific config-derived dataset already exists, which lets this helper paper over the
+	// warm path where HasVolume reports "yes" because some other variant exists while the dataset
+	// for the new pool-default config has not yet been created.
+	maybeEnsureVariant := func(poolDefault drivers.Volume) (*drivers.Volume, error) {
+		if inst == nil || !b.driver.Info().HasImageVariants {
+			return &poolDefault, nil
+		}
+
+		instVolCfg := map[string]string{}
+		err := b.applyInstanceRootDiskInitialValues(inst, instVolCfg)
+		if err != nil {
+			return nil, err
+		}
+
+		target := b.GetNewVolume(drivers.VolumeTypeImage, contentType, image.Fingerprint, instVolCfg)
+
+		err = b.driver.FillVolumeConfig(target)
+		if err != nil {
+			return nil, err
+		}
+
+		targetFiller := drivers.VolumeFiller{
+			Fingerprint: image.Fingerprint,
+			Fill:        b.imageFiller(image.Fingerprint, progressReporter, projectName),
+		}
+
+		err = b.driver.CreateVolume(target, &targetFiller, progressReporter)
+		if err != nil {
+			return nil, err
+		}
+
+		return &target, nil
+	}
+
 	// Try and load any existing volume config on this storage pool so we can compare filesystems if needed.
 	imgDBVol, err := VolumeDBGet(b, api.ProjectDefaultName, image.Fingerprint, drivers.VolumeTypeImage)
 	if err != nil && !response.IsNotFoundError(err) {
-		return err
+		return nil, err
 	}
 
 	// Create the new image volume. No config for an image volume so set to nil.
@@ -4245,7 +4329,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 		tmpImgVol := imgVol.Clone()
 		err := b.Driver().FillVolumeConfig(tmpImgVol)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// Add existing image volume's config to imgVol.
@@ -4262,7 +4346,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			newImgVol := b.GetNewVolume(drivers.VolumeTypeImage, contentType, image.Fingerprint, nil)
 			err = b.driver.FillVolumeConfig(newImgVol)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			// Check whether any image volume already exists on disk.
@@ -4272,13 +4356,13 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			// is checked.
 			newExists, err := b.driver.HasVolume(newImgVol)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			// Delete old DB record so it can be recreated with new pool defaults.
 			err = VolumeDBDelete(b, api.ProjectDefaultName, image.Fingerprint, drivers.VolumeTypeImage)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			if newExists {
@@ -4290,10 +4374,10 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 					drivers.VolumeTypeImage, false, newImgVol.Config(),
 					time.Now().UTC(), time.Time{}, contentType, false, false)
 				if err != nil {
-					return err
+					return nil, err
 				}
 
-				return nil
+				return maybeEnsureVariant(newImgVol)
 			}
 
 			// Fall through to create the new pool-default volume.
@@ -4309,14 +4393,14 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 		// Fill with pool defaults so the volume existence check targets the correct dataset.
 		err = b.driver.FillVolumeConfig(imgVol)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Check if we already have a suitable volume on storage device.
 	volExists, err := b.driver.HasVolume(imgVol)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if volExists {
@@ -4328,7 +4412,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			l.Debug("Checking image volume size")
 			newVolSize, err := imgVol.ConfigSizeFromSource(imgVol)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			imgVol.SetConfigSize(newVolSize)
@@ -4338,12 +4422,14 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			l.Debug("Setting image volume size", logger.Ctx{"size": imgVol.ConfigSize()})
 			err = b.driver.SetVolumeQuota(imgVol, imgVol.ConfigSize(), false, progressReporter)
 			if err == nil {
-				// We already have a valid volume at the correct size, just return.
-				return nil
+				// Pool-default already cached and the size policy still applies; ensure any
+				// per-instance variant exists before returning so the warm path satisfies the
+				// same contract as the cold path below.
+				return maybeEnsureVariant(imgVol)
 			}
 
 			if !errors.Is(err, drivers.ErrCannotBeShrunk) && !errors.Is(err, drivers.ErrNotSupported) {
-				return err
+				return nil, err
 			}
 
 			// If the driver cannot resize the existing image volume to the new policy size
@@ -4351,7 +4437,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			l.Debug("Volume size of pool has changed since cached image volume created and cached volume cannot be resized, regenerating image volume")
 			err = b.DeleteImage(ctx, image.Fingerprint, progressReporter)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			// Reset img volume variables as we just deleted the old one.
@@ -4366,7 +4452,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			l.Warn("Deleting leftover/partially unpacked image volume")
 			err = b.driver.DeleteVolume(imgVol, progressReporter)
 			if err != nil {
-				return fmt.Errorf("Failed deleting leftover/partially unpacked image volume: %w", err)
+				return nil, fmt.Errorf("Failed deleting leftover/partially unpacked image volume: %w", err)
 			}
 		}
 	}
@@ -4386,7 +4472,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 	if imgDBVol == nil {
 		err = VolumeDBCreate(b, api.ProjectDefaultName, image.Fingerprint, "", drivers.VolumeTypeImage, false, imgVol.Config(), time.Now().UTC(), time.Time{}, contentType, false, false)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		revert.Add(func() { _ = VolumeDBDelete(b, api.ProjectDefaultName, image.Fingerprint, drivers.VolumeTypeImage) })
@@ -4394,7 +4480,7 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 
 	err = b.driver.CreateVolume(imgVol, &volFiller, progressReporter)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	revert.Add(func() { _ = b.driver.DeleteVolume(imgVol, progressReporter) })
@@ -4407,47 +4493,13 @@ func (b *lxdBackend) EnsureImage(ctx context.Context, fingerprint string, projec
 			return tx.UpdateStoragePoolVolume(ctx, api.ProjectDefaultName, image.Fingerprint, cluster.StoragePoolVolumeTypeImage, b.id, "", imgVol.Config())
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	revert.Success()
 
-	// When an instance is supplied and its effective config differs from the pool
-	// default, ensure an on-disk image variant matching the instance's config exists
-	// so the upcoming clone has its source ready. The DB record above already reflects
-	// pool defaults; no per-variant DB row is written. Only drivers that maintain
-	// per-config variants on disk participate; other optimised-image drivers cannot
-	// serve a non-default config from the cached image and rely on a direct unpack.
-	if inst != nil && b.driver.Info().HasImageVariants {
-		instVolCfg := map[string]string{}
-
-		err = b.applyInstanceRootDiskInitialValues(inst, instVolCfg)
-		if err != nil {
-			return err
-		}
-
-		variant := b.GetNewVolume(drivers.VolumeTypeImage, contentType, image.Fingerprint, instVolCfg)
-
-		err = b.driver.FillVolumeConfig(variant)
-		if err != nil {
-			return err
-		}
-
-		if !b.driver.ImageVolumeConfigMatch(variant, imgVol) {
-			variantFiller := drivers.VolumeFiller{
-				Fingerprint: image.Fingerprint,
-				Fill:        b.imageFiller(image.Fingerprint, progressReporter, projectName),
-			}
-
-			err = b.driver.CreateVolume(variant, &variantFiller, progressReporter)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+	return maybeEnsureVariant(imgVol)
 }
 
 // DeleteImage removes an image from the database and underlying storage device if needed.
