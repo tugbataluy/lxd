@@ -1863,11 +1863,16 @@ func (d *zfs) SetVolumeQuota(vol Volume, size string, allowUnsafeResize bool, pr
 			return nil
 		}
 
-		if vol.contentType == ContentTypeFS {
-			if vol.volType == VolumeTypeImage {
-				return fmt.Errorf("Image volumes cannot be resized: %w", ErrCannotBeShrunk)
-			}
+		// Image variants are caches: their on-disk size does not affect functionality.
+		// Instances clone from the @readonly snapshot and apply the pool's current
+		// volume.size policy to their own clone, so the variant itself never needs to
+		// be resized. Resizing in place would also require destroying clones that
+		// reference the snapshot.
+		if vol.volType == VolumeTypeImage {
+			return nil
+		}
 
+		if vol.contentType == ContentTypeFS {
 			// Activate volume if needed.
 			activated, volDevPath, err := d.activateVolume(vol)
 			if err != nil {
