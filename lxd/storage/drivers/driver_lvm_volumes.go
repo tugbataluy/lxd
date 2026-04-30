@@ -173,11 +173,6 @@ func (d *lvm) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser,
 	return err
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *lvm) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
-	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
-}
-
 // RefreshVolume provides same-pool volume and specific snapshots syncing functionality.
 func (d *lvm) RefreshVolume(vol VolumeCopy, srcVol VolumeCopy, refreshSnapshots []string, allowInconsistent bool, progressReporter ioprogress.ProgressReporter) error {
 	// We can use optimised copying when the pool is backed by an LVM thinpool.
