@@ -60,95 +60,29 @@ func (d *zfs) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter io
 		revert.Add(func() { _ = os.Remove(vol.MountPath()) })
 	}
 
-	// Look for previously deleted images.
 	if vol.volType == VolumeTypeImage {
-		dataset := d.dataset(vol, true)
-		exists, err := d.datasetExists(dataset)
+		restored, err := d.tryRestoreDeletedImageVolume(vol)
 		if err != nil {
 			return err
 		}
 
-		if exists {
-			canRestore := true
-
-			if vol.IsBlockBacked() && (vol.contentType == ContentTypeBlock || d.isBlockBacked(vol)) {
-				// For block volumes check if the cached image volume is larger than the current pool volume.size
-				// setting (if so we won't be able to resize the snapshot to that the smaller size later).
-				volSize, err := d.getDatasetProperty(dataset, "volsize")
-				if err != nil {
-					return err
-				}
-
-				volSizeBytes, err := strconv.ParseInt(volSize, 10, 64)
-				if err != nil {
-					return err
-				}
-
-				poolVolSize := d.Info().DefaultBlockSize
-				if vol.poolConfig["volume.size"] != "" {
-					poolVolSize = vol.poolConfig["volume.size"]
-				}
-
-				poolVolSizeBytes, err := units.ParseByteSizeString(poolVolSize)
-				if err != nil {
-					return err
-				}
-
-				// Round to block boundary.
-				poolVolSizeBytes = d.roundVolumeBlockSizeBytes(vol, poolVolSizeBytes)
-
-				// If the cached volume size is different than the pool volume size, then we can't use the
-				// deleted cached image volume and instead we will rename it to a random UUID so it can't
-				// be restored in the future and a new cached image volume will be created instead.
-				if volSizeBytes != poolVolSizeBytes {
-					d.logger.Debug("Renaming deleted cached image volume so that regeneration is used", logger.Ctx{"fingerprint": vol.Name()})
-					randomVol := NewVolume(d, d.name, vol.volType, vol.contentType, d.randomVolumeName(vol), vol.config, vol.poolConfig)
-
-					_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", dataset, d.dataset(randomVol, true))
-					if err != nil {
-						return err
-					}
-
-					if vol.IsVMBlock() {
-						fsVol := vol.NewVMBlockFilesystemVolume()
-						randomFsVol := randomVol.NewVMBlockFilesystemVolume()
-
-						_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", d.dataset(fsVol, true), d.dataset(randomFsVol, true))
-						if err != nil {
-							return err
-						}
-					}
-
-					// We have renamed the deleted cached image volume, so we don't want to try and
-					// restore it.
-					canRestore = false
-				}
-			}
-
-			// Restore the image.
-			if canRestore {
-				d.logger.Debug("Restoring previously deleted cached image volume", logger.Ctx{"fingerprint": vol.Name()})
-				_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", dataset, d.dataset(vol, false))
-				if err != nil {
-					return err
-				}
-
-				if vol.IsVMBlock() {
-					fsVol := vol.NewVMBlockFilesystemVolume()
-
-					_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", d.dataset(fsVol, true), d.dataset(fsVol, false))
-					if err != nil {
-						return err
-					}
-				}
-
-				revert.Success()
-				return nil
-			}
+		if restored {
+			revert.Success()
+			return nil
 		}
+
+		revert.Add(func() { _ = d.DeleteVolume(vol, progressReporter) })
+
+		err = d.createImageVolumeOnDisk(vol, filler, progressReporter)
+		if err != nil {
+			return err
+		}
+
+		revert.Success()
+		return nil
 	}
 
-	// After this point we'll have a volume, so setup revert.
+	// Non-image volume creation below.
 	revert.Add(func() { _ = d.DeleteVolume(vol, progressReporter) })
 
 	if vol.contentType == ContentTypeFS && !d.isBlockBacked(vol) {
@@ -243,7 +177,7 @@ func (d *zfs) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter io
 		}
 	}
 
-	// For VM images, create a filesystem volume too.
+	// For VM volumes, create a filesystem volume too.
 	if vol.IsVMBlock() {
 		fsVol := vol.NewVMBlockFilesystemVolume()
 		err := d.CreateVolume(fsVol, nil, progressReporter)
@@ -313,33 +247,256 @@ func (d *zfs) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter io
 		return err
 	}
 
-	// Setup snapshot and unset mountpoint on image.
-	if vol.volType == VolumeTypeImage {
-		// Create snapshot of the main dataset.
-		_, err := shared.RunCommand(context.TODO(), "zfs", "snapshot", "-r", d.dataset(vol, false)+"@readonly")
+	// All done.
+	revert.Success()
+
+	return nil
+}
+
+// tryRestoreDeletedImageVolume checks for a previously soft-deleted image volume in deleted/images/
+// and restores it if the size still matches pool defaults. This avoids a full image unpack when
+// the volume was recently deleted but is still on disk.
+func (d *zfs) tryRestoreDeletedImageVolume(vol Volume) (bool, error) {
+	dataset := d.dataset(vol, true)
+	exists, err := d.datasetExists(dataset)
+	if err != nil {
+		return false, err
+	}
+
+	if !exists {
+		return false, nil
+	}
+
+	canRestore := true
+
+	if vol.IsBlockBacked() && (vol.contentType == ContentTypeBlock || d.isBlockBacked(vol)) {
+		// For block volumes check if the cached image volume is larger than the current pool volume.size
+		// setting (if so we won't be able to resize the snapshot to that the smaller size later).
+		volSize, err := d.getDatasetProperty(dataset, "volsize")
+		if err != nil {
+			return false, err
+		}
+
+		volSizeBytes, err := strconv.ParseInt(volSize, 10, 64)
+		if err != nil {
+			return false, err
+		}
+
+		poolVolSize := d.Info().DefaultBlockSize
+		if vol.poolConfig["volume.size"] != "" {
+			poolVolSize = vol.poolConfig["volume.size"]
+		}
+
+		poolVolSizeBytes, err := units.ParseByteSizeString(poolVolSize)
+		if err != nil {
+			return false, err
+		}
+
+		// Round to block boundary.
+		poolVolSizeBytes = d.roundVolumeBlockSizeBytes(vol, poolVolSizeBytes)
+
+		// If the cached volume size is different than the pool volume size, then we can't use the
+		// deleted cached image volume and instead we will rename it to a random UUID so it can't
+		// be restored in the future and a new cached image volume will be created instead.
+		if volSizeBytes != poolVolSizeBytes {
+			d.logger.Debug("Renaming deleted cached image volume so that regeneration is used", logger.Ctx{"fingerprint": vol.Name()})
+			randomVol := NewVolume(d, d.name, vol.volType, vol.contentType, d.randomVolumeName(vol), vol.config, vol.poolConfig)
+
+			_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", dataset, d.dataset(randomVol, true))
+			if err != nil {
+				return false, err
+			}
+
+			if vol.IsVMBlock() {
+				fsVol := vol.NewVMBlockFilesystemVolume()
+				randomFsVol := randomVol.NewVMBlockFilesystemVolume()
+
+				_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", d.dataset(fsVol, true), d.dataset(randomFsVol, true))
+				if err != nil {
+					return false, err
+				}
+			}
+
+			canRestore = false
+		}
+	}
+
+	if !canRestore {
+		return false, nil
+	}
+
+	// Restore the image by moving it back from the deleted/ path.
+	d.logger.Debug("Restoring previously deleted cached image volume", logger.Ctx{"fingerprint": vol.Name()})
+	_, err = shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", dataset, d.dataset(vol, false))
+	if err != nil {
+		return false, err
+	}
+
+	if vol.IsVMBlock() {
+		fsVol := vol.NewVMBlockFilesystemVolume()
+
+		_, err := shared.RunCommand(context.TODO(), "/proc/self/exe", "forkzfs", "--", "rename", d.dataset(fsVol, true), d.dataset(fsVol, false))
+		if err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+// createImageVolumeOnDisk creates the ZFS dataset/zvol for an image volume, runs the filler
+// to unpack the image, and creates the @readonly snapshot for cloning. Caller handles revert.
+func (d *zfs) createImageVolumeOnDisk(vol Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+	if vol.contentType == ContentTypeFS && !d.isBlockBacked(vol) {
+		// Create the filesystem dataset.
+		err := d.createDataset(d.dataset(vol, false), "mountpoint=legacy", "canmount=noauto")
 		if err != nil {
 			return err
 		}
 
-		if vol.contentType == ContentTypeBlock {
-			// Re-create the FS config volume's readonly snapshot now that the filler function has run
-			// and unpacked into both config and block volumes.
-			fsVolDsName := d.dataset(vol.NewVMBlockFilesystemVolume(), false) + "@readonly"
+		// Apply the size limit.
+		err = d.SetVolumeQuota(vol, vol.ConfigSize(), false, progressReporter)
+		if err != nil {
+			return err
+		}
 
-			_, err := shared.RunCommand(context.TODO(), "zfs", "destroy", "-r", fsVolDsName)
+		// Apply the blocksize.
+		err = d.setBlocksizeFromConfig(vol)
+		if err != nil {
+			return err
+		}
+	} else {
+		var opts []string
+
+		if vol.contentType == ContentTypeFS {
+			// Use volmode=dev so volume is visible as we need to run makeFSType.
+			opts = []string{"volmode=dev"}
+		} else {
+			// Use volmode=none so volume is invisible until mounted.
+			opts = []string{"volmode=none"}
+		}
+
+		loopPath := loopFilePath(d.name)
+		if d.config["source"] == loopPath {
+			opts = append(opts, "sync=disabled")
+		}
+
+		blockSize := vol.ExpandedConfig("zfs.blocksize")
+		if blockSize != "" {
+			sizeBytes, err := units.ParseByteSizeString(blockSize)
 			if err != nil {
 				return err
 			}
 
-			_, err = shared.RunCommand(context.TODO(), "zfs", "snapshot", "-r", fsVolDsName)
+			if sizeBytes > zfsMaxVolBlocksize {
+				sizeBytes = zfsMaxVolBlocksize
+			}
+
+			opts = append(opts, fmt.Sprintf("volblocksize=%d", sizeBytes))
+		}
+
+		sizeBytes, err := units.ParseByteSizeString(vol.ConfigSize())
+		if err != nil {
+			return err
+		}
+
+		sizeBytes = d.roundVolumeBlockSizeBytes(vol, sizeBytes)
+
+		err = d.createVolume(d.dataset(vol, false), sizeBytes, opts...)
+		if err != nil {
+			return err
+		}
+
+		if vol.contentType == ContentTypeFS {
+			activated, volPath, err := d.activateVolume(vol)
+			if err != nil {
+				return err
+			}
+
+			if activated {
+				defer func() { _, _ = d.deactivateVolume(vol) }()
+			}
+
+			_, err = makeFSType(volPath, vol.ConfigBlockFilesystem(), nil)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	// All done.
-	revert.Success()
+	// For VM images, also create the filesystem config volume.
+	if vol.IsVMBlock() {
+		fsVol := vol.NewVMBlockFilesystemVolume()
+		err := d.CreateVolume(fsVol, nil, progressReporter)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Mount and run the filler to unpack the image content.
+	err := vol.MountTask(func(mountPath string, progressReporter ioprogress.ProgressReporter) error {
+		if filler != nil && filler.Fill != nil {
+			var err error
+			var devPath string
+
+			if IsContentBlock(vol.contentType) {
+				devPath, err = d.GetVolumeDiskPath(vol)
+				if err != nil {
+					return err
+				}
+			}
+
+			// Allow unsafe resize during image unpack. The volume has no snapshots yet
+			// and the filler may need to grow it beyond the default pool size.
+			err = d.runFiller(vol, devPath, filler, true)
+			if err != nil {
+				return err
+			}
+
+			if vol.IsVMBlock() {
+				err = d.moveGPTAltHeader(devPath)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		if vol.contentType == ContentTypeFS {
+			// Re-apply mount path permissions after the filler has written files.
+			err := vol.EnsureMountPath()
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, progressReporter)
+	if err != nil {
+		return err
+	}
+
+	// Create @readonly snapshot used as the clone source for new instances.
+	_, err = shared.RunCommand(context.TODO(), "zfs", "snapshot", "-r", d.dataset(vol, false)+"@readonly")
+	if err != nil {
+		return err
+	}
+
+	// For VM block images, the FS config volume's @readonly snapshot was created by the
+	// recursive CreateVolume call above (before the filler ran). Re-create it now that the
+	// filler has unpacked content into the config volume.
+	if vol.contentType == ContentTypeBlock {
+		fsVolDsName := d.dataset(vol.NewVMBlockFilesystemVolume(), false) + "@readonly"
+
+		_, err := shared.RunCommand(context.TODO(), "zfs", "destroy", "-r", fsVolDsName)
+		if err != nil {
+			return err
+		}
+
+		_, err = shared.RunCommand(context.TODO(), "zfs", "snapshot", "-r", fsVolDsName)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -1251,9 +1408,132 @@ func (d *zfs) createVolumeFromMigrationOptimized(vol Volume, conn io.ReadWriteCl
 	return nil
 }
 
-// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+// EnsureImage creates a volume from an image. ZFS manages multiple
+// on-disk image variants internally, so this method checks whether the passed
+// imgVol is actually usable (its dataset exists and config matches the instance)
+// before taking the standard clone path. If not, it finds or creates the right
+// variant for the instance config and clones from that.
 func (d *zfs) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
-	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
+	// Standard optimized path: imgVol dataset exists on disk and config matches.
+	// The DB may point to a variant that has not been created yet when the pool
+	// config changed and the variant is being created lazily, so verify existence.
+	if imgVol != nil {
+		imgDataset := d.dataset(*imgVol, false)
+		exists, err := d.datasetExists(imgDataset)
+		if err != nil {
+			return err
+		}
+
+		if exists && d.ImageVolumeConfigMatch(*imgVol, vol) {
+			return createVolumeFromImage(vol, imgVol, filler, progressReporter)
+		}
+	}
+
+	// Variant path: find or create the image variant matching the instance config.
+	if filler != nil && filler.Fingerprint != "" && vol.volType != VolumeTypeImage {
+		cloned, err := d.tryOptimizedImageClone(vol, filler, progressReporter)
+		if err != nil {
+			d.logger.Debug("Optimized image variant clone failed, falling back to unpack", logger.Ctx{"err": err})
+		}
+
+		if cloned {
+			return nil
+		}
+	}
+
+	// Fall back to full unpack.
+	return d.CreateVolume(vol, filler, progressReporter)
+}
+
+// tryOptimizedImageClone attempts to clone an instance volume from an existing image variant
+// instead of performing a full image unpack. Returns true if cloning succeeded, false if the
+// caller should fall back to normal creation.
+func (d *zfs) tryOptimizedImageClone(vol Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) (bool, error) {
+	// Build image volume with the instance's config.
+	imgVol := NewVolume(d, d.name, VolumeTypeImage, vol.contentType, filler.Fingerprint, vol.config, vol.poolConfig)
+
+	err := d.FillVolumeConfig(imgVol)
+	if err != nil {
+		return false, err
+	}
+
+	// Check if variant exists.
+	variantDataset := d.dataset(imgVol, false)
+	exists, err := d.datasetExists(variantDataset)
+	if err != nil {
+		return false, err
+	}
+
+	if exists && (vol.contentType == ContentTypeBlock || d.isBlockBacked(imgVol)) {
+		needsRecreate, err := d.variantNeedsRecreateForBlocksize(variantDataset, imgVol)
+		if err != nil {
+			return false, err
+		}
+
+		if needsRecreate {
+			// Delete existing variant (moves to /deleted if has clones).
+			err = d.deleteVolume(imgVol, progressReporter)
+			if err != nil {
+				return false, err
+			}
+
+			exists = false
+		}
+	}
+
+	if !exists {
+		// Create the variant.
+		err = d.createImageVariant(imgVol, filler, progressReporter)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// Clone the instance volume from the variant. CreateVolumeFromCopy handles blocksize,
+	// filesystem UUID regeneration for block-backed variants, VM FS companion cloning, and resize.
+	err = d.CreateVolumeFromCopy(NewVolumeCopy(vol), NewVolumeCopy(imgVol), false, progressReporter)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// createImageVariant creates an image volume variant. On failure, only the variant being
+// created is cleaned up; other existing variants are not affected.
+func (d *zfs) createImageVariant(imgVol Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+	revert := revert.New()
+	defer revert.Fail()
+
+	if imgVol.contentType == ContentTypeFS {
+		err := imgVol.EnsureMountPath()
+		if err != nil {
+			return err
+		}
+
+		revert.Add(func() { _ = os.Remove(imgVol.MountPath()) })
+	}
+
+	// Try to restore a previously soft-deleted variant before unpacking from scratch.
+	restored, err := d.tryRestoreDeletedImageVolume(imgVol)
+	if err != nil {
+		return err
+	}
+
+	if restored {
+		revert.Success()
+		return nil
+	}
+
+	revert.Add(func() { _ = d.deleteVolume(imgVol, progressReporter) })
+
+	err = d.createImageVolumeOnDisk(imgVol, filler, progressReporter)
+	if err != nil {
+		return err
+	}
+
+	revert.Success()
+	return nil
 }
 
 // RefreshVolume updates an existing volume to match the state of another.
