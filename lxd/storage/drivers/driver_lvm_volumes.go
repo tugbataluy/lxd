@@ -173,8 +173,8 @@ func (d *lvm) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser,
 	return err
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *lvm) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+func (d *lvm) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
 }
 

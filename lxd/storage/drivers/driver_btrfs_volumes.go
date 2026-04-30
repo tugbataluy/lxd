@@ -829,8 +829,8 @@ func (d *btrfs) createVolumeFromMigrationOptimized(vol Volume, conn io.ReadWrite
 	return nil
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *btrfs) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+func (d *btrfs) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
 }
 

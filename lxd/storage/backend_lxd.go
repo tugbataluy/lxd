@@ -2204,7 +2204,7 @@ func (b *lxdBackend) CreateInstanceFromImage(ctx context.Context, inst instance.
 
 	// The driver decides whether to clone from the cached image volume or unpack
 	// directly, based on whether imgVol is set and config/size constraints.
-	err = b.driver.CreateVolumeFromImage(vol, imgVol, &volFiller, progressReporter)
+	err = b.driver.EnsureImage(vol, imgVol, &volFiller, progressReporter)
 	if err != nil {
 		return err
 	}

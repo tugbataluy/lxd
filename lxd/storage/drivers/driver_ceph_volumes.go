@@ -751,8 +751,8 @@ func (d *ceph) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser
 	return nil
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *ceph) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+func (d *ceph) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
 }
 

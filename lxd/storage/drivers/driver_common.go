@@ -376,8 +376,8 @@ func (d *common) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowIn
 	return ErrNotSupported
 }
 
-// CreateVolumeFromImage creates volume from images.
-func (d *common) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from images.
+func (d *common) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return ErrNotSupported
 }
 

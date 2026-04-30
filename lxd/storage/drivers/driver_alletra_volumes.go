@@ -551,8 +551,8 @@ func (d *alletra) BackupVolume(vol VolumeCopy, projectName string, tarWriter *in
 	return genericVFSBackupVolume(d, vol, tarWriter, snapshots, progressReporter)
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *alletra) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+func (d *alletra) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
 }
 

@@ -1251,8 +1251,8 @@ func (d *zfs) createVolumeFromMigrationOptimized(vol Volume, conn io.ReadWriteCl
 	return nil
 }
 
-// CreateVolumeFromImage creates volume from image by using createVolumeFromImage utility function.
-func (d *zfs) CreateVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+// EnsureImage creates volume from image by using createVolumeFromImage utility function.
+func (d *zfs) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	return createVolumeFromImage(vol, imgVol, filler, progressReporter)
 }
 
