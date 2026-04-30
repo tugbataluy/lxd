@@ -1413,7 +1413,25 @@ func (d *zfs) createVolumeFromMigrationOptimized(vol Volume, conn io.ReadWriteCl
 // imgVol is actually usable (its dataset exists and config matches the instance)
 // before taking the standard clone path. If not, it finds or creates the right
 // variant for the instance config and clones from that.
+//
+// When called with an image-typed vol (image-only mode), it materialises that
+// variant on disk if missing and returns without cloning. The backend uses this
+// path to ensure the cached pool-default variant exists.
 func (d *zfs) EnsureImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+	// Image-only mode: caller wants the image variant materialised on disk; do not clone.
+	if vol.volType == VolumeTypeImage {
+		exists, err := d.datasetExists(d.dataset(vol, false))
+		if err != nil {
+			return err
+		}
+
+		if exists {
+			return nil
+		}
+
+		return d.createImageVariant(vol, filler, progressReporter)
+	}
+
 	// Standard optimized path: imgVol dataset exists on disk and config matches.
 	// The DB may point to a variant that has not been created yet when the pool
 	// config changed and the variant is being created lazily, so verify existence.

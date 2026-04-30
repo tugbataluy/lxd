@@ -2,73 +2,45 @@ package drivers
 
 import (
 	"errors"
-	"maps"
 
 	"github.com/canonical/lxd/shared/ioprogress"
 )
 
-// imageVolumeConfigMatchesPoolDefault checks whether the instance volume's effective config
-// is compatible with the pool's current defaults for image volumes. If the configs are
-// incompatible, there is no point unpacking the image into a dedicated on-disk image
-// volume because the driver would not be able to clone from it anyway.
-func imageVolumeConfigMatchesPoolDefault(vol Volume) (bool, error) {
-	// Configs are cloned because FillVolumeConfig mutates in place.
-	instImgVol := NewVolume(vol.driver, vol.pool, VolumeTypeImage, vol.contentType, vol.name, maps.Clone(vol.config), maps.Clone(vol.poolConfig))
-	err := vol.driver.FillVolumeConfig(instImgVol)
-	if err != nil {
-		return false, err
-	}
-
-	poolDefaultVol := NewVolume(vol.driver, vol.pool, VolumeTypeImage, vol.contentType, vol.name, make(map[string]string), maps.Clone(vol.poolConfig))
-	err = vol.driver.FillVolumeConfig(poolDefaultVol)
-	if err != nil {
-		return false, err
-	}
-
-	return vol.driver.ImageVolumeConfigMatch(instImgVol, poolDefaultVol), nil
-}
-
-// CanUseOptimizedImage reports whether the driver supports optimized image volumes and
-// the instance volume's config is compatible with the pool's image-volume defaults.
-// Both conditions must hold: if the driver doesn't cache images at all, or if the
-// instance's config would prevent cloning from a cached image, there's no benefit in
-// maintaining a separate image volume.
-func CanUseOptimizedImage(vol Volume) (bool, error) {
-	// vol is passed by value so it is never nil, but its driver field may be unset.
-	if vol.driver == nil {
-		return false, errors.New("Volume has no associated driver")
-	}
-
-	if !vol.driver.Info().OptimizedImages {
-		return false, nil
-	}
-
-	return imageVolumeConfigMatchesPoolDefault(vol)
-}
-
 // createVolumeFromImage creates a new volume from an image. If imgVol is nil (no cached
 // image volume is available), it falls back to unpacking the image directly into a new
-// volume via the filler. Otherwise it verifies that the cached image volume's config still
-// matches the pool's defaults and clones from it, falling back to a direct unpack if the
-// configs have drifted or the image volume cannot be shrunk to the requested size.
+// volume via the filler. Otherwise it clones from imgVol, falling back to a direct unpack
+// if imgVol's config is incompatible with vol or the image volume cannot be shrunk to
+// the requested size.
 func createVolumeFromImage(vol Volume, imgVol *Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	// vol is passed by value so it is never nil, but its driver field may be unset.
 	if vol.driver == nil {
 		return errors.New("Volume has no associated driver")
 	}
 
+	// Image-only mode: caller asks the driver to materialise the image volume itself
+	// (vol is the image volume, no source to clone from). Skip if already on disk.
+	if imgVol == nil && vol.volType == VolumeTypeImage {
+		exists, err := vol.driver.HasVolume(vol)
+		if err != nil {
+			return err
+		}
+
+		if exists {
+			return nil
+		}
+
+		return vol.driver.CreateVolume(vol, filler, progressReporter)
+	}
+
 	if imgVol == nil {
 		return vol.driver.CreateVolume(vol, filler, progressReporter)
 	}
 
-	// Pool settings may have changed since the cached image volume was created.
-	poolDefaultVol := NewVolume(vol.driver, vol.pool, VolumeTypeImage, vol.contentType, imgVol.name, make(map[string]string), maps.Clone(vol.poolConfig))
-	err := vol.driver.FillVolumeConfig(poolDefaultVol)
-	if err != nil {
-		return err
-	}
-
-	if !vol.driver.ImageVolumeConfigMatch(*imgVol, poolDefaultVol) {
+	// imgVol must be compatible with vol's effective config. For variant-aware drivers
+	// the caller has already selected the right variant; for single-variant drivers
+	// imgVol is the pool-default cached image, so this also catches per-instance
+	// config that diverges from pool defaults.
+	if !vol.driver.ImageVolumeConfigMatch(*imgVol, vol) {
 		return vol.driver.CreateVolume(vol, filler, progressReporter)
 	}
 
