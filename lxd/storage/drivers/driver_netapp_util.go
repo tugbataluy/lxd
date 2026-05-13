@@ -518,7 +518,7 @@ func (c *netappClient) getFlexVol(ctx context.Context, name string, svmName stri
 // getNamespace fetches a Namespace by path.
 func (c *netappClient) getNamespace(ctx context.Context, path string, svmName string) (*netappNamespace, error) {
 	var resp netappNamespaceResponse
-	apiPath := fmt.Sprintf("/storage/namespaces?name=%s&svm.name=%s&fields=uuid,name,nguid,space", path, svmName)
+	apiPath := fmt.Sprintf("/storage/namespaces?name=%s&svm.name=%s&fields=uuid,name,space", path, svmName)
 
 	err := c.do(ctx, http.MethodGet, apiPath, nil, &resp)
 	if err != nil {
