@@ -340,9 +340,9 @@ func (d *netapp) Delete(progressReporter ioprogress.ProgressReporter) error {
 }
 
 // isOntapLXDVolume reports whether the FlexVol name follows the driver's
-// `<prefix>-<uuid>[-<suffix>]` scheme and is therefore owned by LXD.
+// `<prefix>_<uuid>[_<suffix>]` scheme and is therefore owned by LXD.
 func isOntapLXDVolume(name string) bool {
-	if len(name) < 3 || name[1] != '-' {
+	if len(name) < 3 || name[1] != '_' {
 		return false
 	}
 

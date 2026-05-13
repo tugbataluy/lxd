@@ -338,12 +338,12 @@ func (c *netappClient) resizeNamespace(ctx context.Context, uuid string, newSize
 	return nil
 }
 
-// getVolumeName derives the Pure Storage styled ONTAP volume name.
+// getVolumeName derives the ONTAP-compatible volume name.
+// ONTAP FlexVol names only allow alphanumeric characters and underscores.
 func (c *netappClient) getVolumeName(vol Volume) string {
-	// Volume generic UUID naming follows the typical `<typePrefix>-<uuidNoHyphens>[-<contentSuffix>]` rule.
+	// Volume naming follows `<typePrefix>_<uuidNoHyphens>[_<contentSuffix>]`.
 	// As we mandated UUIDVolumeNames: true, the vol.Name is already a valid UUID string from LXD logic.
-
-	// E.g., `c-550e8400e29b41d4a716446655440000` or `v-550e8400e29b41d4a716446655440000-b`
+	// E.g., `c_550e8400e29b41d4a716446655440000` or `v_550e8400e29b41d4a716446655440000_b`
 
 	var prefix string
 	switch vol.volType {
@@ -357,8 +357,8 @@ func (c *netappClient) getVolumeName(vol Volume) string {
 		prefix = "u"
 	}
 
-	// Remove hyphens from UUID for ONTAP size constraints (though ONTAP FlexVol supports 255 chars, it's cleaner)
-	return fmt.Sprintf("%s-%s", prefix, vol.name)
+	// Use underscore as separator since ONTAP doesn't allow hyphens in volume names.
+	return fmt.Sprintf("%s_%s", prefix, vol.name)
 }
 
 // listFlexVols retrieves all FlexVols in the specified aggregate and SVM.

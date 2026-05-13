@@ -812,7 +812,7 @@ func (d *netapp) ListVolumes() ([]Volume, error) {
 		var volType VolumeType
 		var volName string
 
-		parts := strings.Split(fv.Name, "-")
+		parts := strings.Split(fv.Name, "_")
 		if len(parts) < 2 || len(parts) > 3 {
 			continue
 		}
