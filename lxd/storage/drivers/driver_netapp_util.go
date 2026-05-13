@@ -251,9 +251,6 @@ func (c *netappClient) createFlexVol(ctx context.Context, name string, svmName s
 		"guarantee": map[string]string{
 			"type": "none", // Thin provisioning
 		},
-		"space": map[string]interface{}{
-			"fractional_reserve": 0,
-		},
 	}
 
 	err := c.do(ctx, http.MethodPost, "/storage/volumes", req, nil)
