@@ -10,7 +10,6 @@ import (
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
-	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/revert"
@@ -65,9 +64,7 @@ func (d *netapp) createVolume(vol Volume) error {
 		return fmt.Errorf("Failed creating FlexVol: %w", err)
 	}
 
-	// Thin provisioning is enabled by default (netapp.thin=true).
-	thin := shared.IsTrue(d.config["netapp.thin"])
-	err = d.client().createNamespace(d.state.ShutdownCtx, volName, "ns0", svmName, sizeBytes, thin)
+	err = d.client().createNamespace(d.state.ShutdownCtx, volName, "ns0", svmName, sizeBytes)
 	if err != nil {
 		return fmt.Errorf("Failed creating NVMe namespace: %w", err)
 	}

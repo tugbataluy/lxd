@@ -272,7 +272,7 @@ func (c *netappClient) deleteFlexVol(ctx context.Context, uuid string) error {
 }
 
 // createNamespace creates a new NVMe namespace inside a FlexVol.
-func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, namespaceName string, svmName string, sizeBytes int64, thin bool) error {
+func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, namespaceName string, svmName string, sizeBytes int64) error {
 	req := map[string]interface{}{
 		"name": fmt.Sprintf("/vol/%s/%s", flexvolName, namespaceName),
 		"svm": map[string]string{
@@ -280,9 +280,6 @@ func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, 
 		},
 		"space": map[string]interface{}{
 			"size": sizeBytes,
-			"guarantee": map[string]interface{}{
-				"requested": !thin, // Space reservation: false for thin provisioning
-			},
 		},
 		"os_type": "linux",
 	}
