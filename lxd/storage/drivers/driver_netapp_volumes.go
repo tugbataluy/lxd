@@ -16,7 +16,7 @@ import (
 	"github.com/canonical/lxd/shared/units"
 )
 
-// CreateVolume creates a new volume.
+// CreateVolume creates an empty volume and can optionally fill it by executing the supplied filler function.
 func (d *netapp) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
 	revert := revert.New()
 	defer revert.Fail()
@@ -25,15 +25,93 @@ func (d *netapp) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter
 	if err != nil {
 		return err
 	}
+
 	revert.Add(func() { _ = d.DeleteVolume(vol, progressReporter) })
 
-	// VM blocks require a companion filesystem volume for metadata.
-	if vol.IsVMBlock() {
-		fsVol := vol.NewVMBlockFilesystemVolume()
-		err = d.createVolume(fsVol)
+	volumeFilesystem := vol.ConfigBlockFilesystem()
+	if vol.contentType == ContentTypeFS {
+		devPath, cleanup, err := d.getMappedDevPathWithCleanup(vol, true)
 		if err != nil {
 			return err
 		}
+
+		revert.Add(cleanup)
+
+		_, err = makeFSType(devPath, volumeFilesystem, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	// For VMs, also create the filesystem volume.
+	if vol.IsVMBlock() {
+		fsVol := vol.NewVMBlockFilesystemVolume()
+
+		err := d.CreateVolume(fsVol, nil, progressReporter)
+		if err != nil {
+			return err
+		}
+
+		revert.Add(func() { _ = d.DeleteVolume(fsVol, progressReporter) })
+	}
+
+	err = vol.MountTask(func(mountPath string, progressReporter ioprogress.ProgressReporter) error {
+		// Run the volume filler function if supplied.
+		if filler != nil && filler.Fill != nil {
+			var err error
+			var devPath string
+
+			if IsContentBlock(vol.contentType) {
+				// Get the device path.
+				devPath, err = d.GetVolumeDiskPath(vol)
+				if err != nil {
+					return err
+				}
+			}
+
+			allowUnsafeResize := false
+			if vol.volType == VolumeTypeImage {
+				// Allow filler to resize initial image volume as needed.
+				// Some storage drivers don't normally allow image volumes to be resized due to
+				// them having read-only snapshots that cannot be resized. However when creating
+				// the initial image volume and filling it before the snapshot is taken resizing
+				// can be allowed and is required in order to support unpacking images larger than
+				// the default volume size. The filler function is still expected to obey any
+				// volume size restrictions configured on the pool.
+				// Unsafe resize is also needed to disable filesystem resize safety checks.
+				// This is safe because if for some reason an error occurs the volume will be
+				// discarded rather than leaving a corrupt filesystem.
+				allowUnsafeResize = true
+			}
+
+			// Run the filler.
+			err = d.runFiller(vol, devPath, filler, allowUnsafeResize)
+			if err != nil {
+				return err
+			}
+
+			// Move the GPT alt header to end of disk if needed.
+			if vol.IsVMBlock() {
+				err = d.moveGPTAltHeader(devPath)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		if vol.contentType == ContentTypeFS {
+			// Run EnsureMountPath again after mounting and filling to ensure the mount directory has
+			// the correct permissions set.
+			err = vol.EnsureMountPath()
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, progressReporter)
+	if err != nil {
+		return err
 	}
 
 	revert.Success()
@@ -70,6 +148,87 @@ func (d *netapp) createVolume(vol Volume) error {
 	}
 
 	return nil
+}
+
+// getMappedDevPathWithCleanup returns the local device path for the given volume.
+// If mapVolume is true, the volume will be mapped to the host if not already mapped.
+// Returns a cleanup function to unmap the volume on error.
+func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string, revert.Hook, error) {
+	revert := revert.New()
+	defer revert.Fail()
+
+	volName := d.client().getVolumeName(vol)
+	svmName := d.client().svmName
+	nsPath := fmt.Sprintf("/vol/%s/ns0", volName)
+
+	ns, err := d.client().getNamespace(d.state.ShutdownCtx, nsPath, svmName)
+	if err != nil {
+		return "", nil, fmt.Errorf("Failed retrieving namespace: %w", err)
+	}
+
+	if ns.NGUID == "" {
+		return "", nil, fmt.Errorf("Namespace %q has no NGUID", nsPath)
+	}
+
+	conn, err := d.connector()
+	if err != nil {
+		return "", nil, err
+	}
+
+	suffix := strings.ToLower(ns.NGUID)
+	filter := func(devPath string) bool {
+		return strings.HasSuffix(devPath, suffix)
+	}
+
+	var devicePath string
+
+	if mapVolume {
+		subsys, err := d.ensureHost()
+		if err != nil {
+			return "", nil, fmt.Errorf("Failed ensuring host subsystem: %w", err)
+		}
+
+		err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID)
+		if err != nil {
+			return "", nil, fmt.Errorf("Failed mapping namespace to subsystem: %w", err)
+		}
+
+		revert.Add(func() { _ = d.client().unmapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID) })
+
+		// Connect NVMe Subsystem.
+		targets := []string{}
+		if targetConf := d.config["netapp.target"]; targetConf != "" {
+			targets = append(targets, targetConf)
+		} else {
+			targets, err = d.client().getNVMeTargetPortals(d.state.ShutdownCtx, svmName)
+			if err != nil {
+				return "", nil, fmt.Errorf("Failed obtaining NVMe target portals: %w", err)
+			}
+		}
+
+		disconnect, err := conn.Connect(d.state.ShutdownCtx, subsys.TargetNQN, targets...)
+		if err != nil {
+			return "", nil, fmt.Errorf("Failed connecting to NVMe subsystem: %w", err)
+		}
+
+		revert.Add(disconnect)
+
+		// Wait for the kernel to expose the namespace as a /dev/disk/by-id entry.
+		devicePath, err = conn.WaitDiskDevicePath(d.state.ShutdownCtx, filter)
+		if err != nil {
+			return "", nil, fmt.Errorf("Failed waiting for NVMe device: %w", err)
+		}
+	} else {
+		// Expect device to be already mapped.
+		devicePath, err = conn.GetDiskDevicePath(filter)
+		if err != nil {
+			return "", nil, fmt.Errorf("Failed locating device for volume %q: %w", vol.name, err)
+		}
+	}
+
+	cleanup := revert.Clone().Fail
+	revert.Success()
+	return devicePath, cleanup, nil
 }
 
 // GetVolumeDiskPath returns the local device path for a block-content volume.
