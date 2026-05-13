@@ -166,8 +166,8 @@ func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string
 		return "", nil, fmt.Errorf("Failed retrieving namespace: %w", err)
 	}
 
-	if ns.NGUID == "" {
-		return "", nil, fmt.Errorf("Namespace %q has no NGUID", nsPath)
+	if ns.UUID == "" {
+		return "", nil, fmt.Errorf("Namespace %q has no UUID", nsPath)
 	}
 
 	conn, err := d.connector()
@@ -175,7 +175,9 @@ func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string
 		return "", nil, err
 	}
 
-	suffix := strings.ToLower(ns.NGUID)
+	// The Linux NVMe driver uses the namespace UUID as the identifier in
+	// /dev/disk/by-id, lower-cased and without dashes.
+	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -188,7 +190,7 @@ func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string
 			return "", nil, fmt.Errorf("Failed ensuring host subsystem: %w", err)
 		}
 
-		err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID)
+		err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID, svmName)
 		if err != nil {
 			return "", nil, fmt.Errorf("Failed mapping namespace to subsystem: %w", err)
 		}
@@ -259,8 +261,8 @@ func (d *netapp) HasVolume(vol Volume) (bool, error) {
 }
 
 // getMappedDevPath resolves the NVMe namespace for the given volume to a local
-// device path. The namespace NGUID is what the Linux NVMe driver exposes via
-// /dev/disk/by-id/nvme-eui.<nguid> once the host has an active session.
+// device path. The namespace UUID is what the Linux NVMe driver exposes via
+// /dev/disk/by-id/nvme-uuid.<uuid> once the host has an active session.
 func (d *netapp) getMappedDevPath(volName string) (string, error) {
 	svmName := d.client().svmName
 	nsPath := fmt.Sprintf("/vol/%s/ns0", volName)
@@ -270,8 +272,8 @@ func (d *netapp) getMappedDevPath(volName string) (string, error) {
 		return "", err
 	}
 
-	if ns.NGUID == "" {
-		return "", fmt.Errorf("Namespace %q has no NGUID", nsPath)
+	if ns.UUID == "" {
+		return "", fmt.Errorf("Namespace %q has no UUID", nsPath)
 	}
 
 	conn, err := d.connector()
@@ -279,9 +281,9 @@ func (d *netapp) getMappedDevPath(volName string) (string, error) {
 		return "", err
 	}
 
-	// The Linux NVMe driver uses the namespace NGUID as the eui identifier in
-	// /dev/disk/by-id, lower-cased and without separators.
-	suffix := strings.ToLower(ns.NGUID)
+	// The Linux NVMe driver uses the namespace UUID as the identifier in
+	// /dev/disk/by-id, lower-cased and without dashes.
+	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -522,7 +524,7 @@ func (d *netapp) MountVolumeSnapshot(snapVol Volume, progressReporter ioprogress
 		return fmt.Errorf("Failed ensuring host subsystem for snapshot mapping: %w", err)
 	}
 
-	err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID)
+	err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID, svmName)
 	if err != nil {
 		return fmt.Errorf("Failed mapping snapshot namespace to subsystem: %w", err)
 	}
@@ -552,11 +554,13 @@ func (d *netapp) MountVolumeSnapshot(snapVol Volume, progressReporter ioprogress
 
 	revert.Add(disconnect)
 
-	if ns.NGUID == "" {
-		return fmt.Errorf("Snapshot namespace %q has no NGUID", nsPath)
+	if ns.UUID == "" {
+		return fmt.Errorf("Snapshot namespace %q has no UUID", nsPath)
 	}
 
-	suffix := strings.ToLower(ns.NGUID)
+	// The Linux NVMe driver uses the namespace UUID as the identifier in
+	// /dev/disk/by-id, lower-cased and without dashes.
+	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -662,7 +666,7 @@ func (d *netapp) MountVolume(vol Volume, progressReporter ioprogress.ProgressRep
 		return fmt.Errorf("Failed ensuring host subsystem: %w", err)
 	}
 
-	err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID)
+	err = d.client().mapNamespace(d.state.ShutdownCtx, ns.UUID, subsys.UUID, svmName)
 	if err != nil {
 		return fmt.Errorf("Failed mapping namespace to subsystem: %w", err)
 	}
@@ -694,13 +698,15 @@ func (d *netapp) MountVolume(vol Volume, progressReporter ioprogress.ProgressRep
 	revert.Add(disconnect)
 
 	// Wait for the kernel to expose the namespace as a /dev/disk/by-id entry
-	// keyed by the namespace's NGUID. Without this wait, immediately consuming
+	// keyed by the namespace's UUID. Without this wait, immediately consuming
 	// the device (mkfs, MountTask) races the udev settle.
-	if ns.NGUID == "" {
-		return fmt.Errorf("Namespace %q has no NGUID", nsPath)
+	if ns.UUID == "" {
+		return fmt.Errorf("Namespace %q has no UUID", nsPath)
 	}
 
-	suffix := strings.ToLower(ns.NGUID)
+	// The Linux NVMe driver uses the namespace UUID as the identifier in
+	// /dev/disk/by-id, lower-cased and without dashes.
+	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}

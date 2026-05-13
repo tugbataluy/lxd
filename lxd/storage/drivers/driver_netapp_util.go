@@ -603,13 +603,16 @@ func (c *netappClient) removeHostFromSubsystem(ctx context.Context, subsysUUID s
 }
 
 // mapNamespace maps an NVMe namespace to an NVMe subsystem.
-func (c *netappClient) mapNamespace(ctx context.Context, namespaceUUID string, subsysUUID string) error {
+func (c *netappClient) mapNamespace(ctx context.Context, namespaceUUID string, subsysUUID string, svmName string) error {
 	req := map[string]interface{}{
 		"namespace": map[string]string{
 			"uuid": namespaceUUID,
 		},
 		"subsystem": map[string]string{
 			"uuid": subsysUUID,
+		},
+		"svm": map[string]string{
+			"name": svmName,
 		},
 	}
 
