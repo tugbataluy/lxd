@@ -287,7 +287,7 @@ func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, 
 		"os_type": "linux",
 	}
 
-	err := c.do(ctx, http.MethodPost, "/protocols/nvme/namespaces", req, nil)
+	err := c.do(ctx, http.MethodPost, "/storage/namespaces", req, nil)
 	if err != nil {
 		return fmt.Errorf("Failed creating NVMe namespace: %w", err)
 	}
@@ -297,7 +297,7 @@ func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, 
 
 // deleteNamespace deletes an NVMe namespace.
 func (c *netappClient) deleteNamespace(ctx context.Context, uuid string) error {
-	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/protocols/nvme/namespaces/%s", uuid), nil, nil)
+	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/storage/namespaces/%s", uuid), nil, nil)
 	if err != nil {
 		return fmt.Errorf("Failed deleting NVMe namespace: %w", err)
 	}
@@ -327,7 +327,7 @@ func (c *netappClient) resizeNamespace(ctx context.Context, uuid string, newSize
 		},
 	}
 
-	err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/protocols/nvme/namespaces/%s", uuid), req, nil)
+	err := c.do(ctx, http.MethodPatch, fmt.Sprintf("/storage/namespaces/%s", uuid), req, nil)
 	if err != nil {
 		return fmt.Errorf("Failed resizing NVMe namespace: %w", err)
 	}
@@ -521,7 +521,7 @@ func (c *netappClient) getFlexVol(ctx context.Context, name string, svmName stri
 // getNamespace fetches a Namespace by path.
 func (c *netappClient) getNamespace(ctx context.Context, path string, svmName string) (*netappNamespace, error) {
 	var resp netappNamespaceResponse
-	apiPath := fmt.Sprintf("/protocols/nvme/namespaces?name=%s&svm.name=%s&fields=uuid,name,nguid,space", path, svmName)
+	apiPath := fmt.Sprintf("/storage/namespaces?name=%s&svm.name=%s&fields=uuid,name,nguid,space", path, svmName)
 
 	err := c.do(ctx, http.MethodGet, apiPath, nil, &resp)
 	if err != nil {
