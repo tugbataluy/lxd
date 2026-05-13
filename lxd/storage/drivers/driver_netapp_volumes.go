@@ -176,8 +176,8 @@ func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string
 	}
 
 	// The Linux NVMe driver uses the namespace UUID as the identifier in
-	// /dev/disk/by-id, lower-cased and without dashes.
-	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
+	// /dev/disk/by-id/nvme-uuid.<uuid>, lower-cased with dashes.
+	suffix := strings.ToLower(ns.UUID)
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -282,8 +282,8 @@ func (d *netapp) getMappedDevPath(volName string) (string, error) {
 	}
 
 	// The Linux NVMe driver uses the namespace UUID as the identifier in
-	// /dev/disk/by-id, lower-cased and without dashes.
-	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
+	// /dev/disk/by-id/nvme-uuid.<uuid>, lower-cased with dashes.
+	suffix := strings.ToLower(ns.UUID)
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -559,8 +559,8 @@ func (d *netapp) MountVolumeSnapshot(snapVol Volume, progressReporter ioprogress
 	}
 
 	// The Linux NVMe driver uses the namespace UUID as the identifier in
-	// /dev/disk/by-id, lower-cased and without dashes.
-	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
+	// /dev/disk/by-id/nvme-uuid.<uuid>, lower-cased with dashes.
+	suffix := strings.ToLower(ns.UUID)
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
@@ -705,8 +705,8 @@ func (d *netapp) MountVolume(vol Volume, progressReporter ioprogress.ProgressRep
 	}
 
 	// The Linux NVMe driver uses the namespace UUID as the identifier in
-	// /dev/disk/by-id, lower-cased and without dashes.
-	suffix := strings.ToLower(strings.ReplaceAll(ns.UUID, "-", ""))
+	// /dev/disk/by-id/nvme-uuid.<uuid>, lower-cased with dashes.
+	suffix := strings.ToLower(ns.UUID)
 	filter := func(devPath string) bool {
 		return strings.HasSuffix(devPath, suffix)
 	}
