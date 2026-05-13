@@ -75,14 +75,9 @@ func (d *netapp) client() *netappClient {
 			Proxy:           http.ProxyFromEnvironment,
 		}
 
-		// The SVM is discovered from the aggregate at pool-create time and
-		// persisted in volatile config; a stale config["netapp.svm"] entry
-		// (legacy or test override) takes precedence so users can pin a
-		// specific SVM if the aggregate later moves.
+		// The SVM must be explicitly configured - it cannot be auto-discovered
+		// from aggregates. In ONTAP, aggregates belong to nodes, not SVMs.
 		svmName := d.config["netapp.svm"]
-		if svmName == "" {
-			svmName = d.config["volatile.svm.name"]
-		}
 
 		d.httpClient = &netappClient{
 			gateway:    d.config["netapp.gateway"],
@@ -184,6 +179,14 @@ func (d *netapp) Validate(config map[string]string) error {
 		//  shortdesc: Password for ONTAP API authentication
 		//  scope: global
 		"netapp.user.password": validate.IsAny,
+		// lxdmeta:generate(entities=storage-ontap; group=pool-conf; key=netapp.svm)
+		// The Storage Virtual Machine (SVM/Vserver) that provides NVMe services.
+		// SVMs are multi-tenant containers in ONTAP that isolate data and network access.
+		// ---
+		//  type: string
+		//  shortdesc: Storage Virtual Machine (SVM) name
+		//  scope: global
+		"netapp.svm": validate.IsAny,
 		// lxdmeta:generate(entities=storage-ontap; group=pool-conf; key=netapp.aggregate)
 		//
 		// ---
@@ -264,6 +267,10 @@ func (d *netapp) ValidateSource() error {
 		return errors.New("The netapp.user.password cannot be empty")
 	}
 
+	if d.config["netapp.svm"] == "" {
+		return errors.New("The netapp.svm cannot be empty")
+	}
+
 	if d.config["netapp.aggregate"] == "" {
 		return errors.New("The netapp.aggregate cannot be empty")
 	}
@@ -274,25 +281,25 @@ func (d *netapp) ValidateSource() error {
 // Create is called during pool creation and is effectively using an empty driver struct.
 // WARNING: The Create() function cannot rely on any of the struct attributes being set.
 func (d *netapp) Create() error {
+	// Validate the SVM is configured.
+	if d.config["netapp.svm"] == "" {
+		return errors.New("SVM name (netapp.svm) is required for pool creation")
+	}
+
 	if d.config["netapp.aggregate"] == "" {
-		return errors.New("Aggregate name is required for pool creation")
+		return errors.New("Aggregate name (netapp.aggregate) is required for pool creation")
 	}
 
 	// Validate the aggregate exists and has capacity.
-	aggr, err := d.client().getAggregate(context.TODO(), d.config["netapp.aggregate"])
+	_, err := d.client().getAggregate(context.TODO(), d.config["netapp.aggregate"])
 	if err != nil {
 		return fmt.Errorf("Failed verifying target aggregate: %w", err)
 	}
 
-	// Record the discovered SVM in volatile so subsequent driver loads don't
-	// need to re-query the aggregate just to learn the owning Vserver.
-	d.config["volatile.svm.name"] = aggr.SVM.Name
-	d.config["volatile.svm.uuid"] = aggr.SVM.UUID
-	d.client().svmName = aggr.SVM.Name
-
-	err = d.client().getNVMeService(context.TODO(), aggr.SVM.Name)
+	// Verify NVMe service is enabled on the configured SVM.
+	err = d.client().getNVMeService(context.TODO(), d.config["netapp.svm"])
 	if err != nil {
-		return fmt.Errorf("Failed verifying NVMe service: %w", err)
+		return fmt.Errorf("Failed verifying NVMe service on SVM %q: %w", d.config["netapp.svm"], err)
 	}
 
 	return nil

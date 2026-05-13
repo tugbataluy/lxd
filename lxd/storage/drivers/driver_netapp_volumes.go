@@ -9,6 +9,7 @@ import (
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
+	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/revert"
@@ -63,7 +64,9 @@ func (d *netapp) createVolume(vol Volume) error {
 		return fmt.Errorf("Failed creating FlexVol: %w", err)
 	}
 
-	err = d.client().createNamespace(d.state.ShutdownCtx, volName, "ns0", svmName, sizeBytes)
+	// Thin provisioning is enabled by default (netapp.thin=true).
+	thin := shared.IsTrue(d.config["netapp.thin"])
+	err = d.client().createNamespace(d.state.ShutdownCtx, volName, "ns0", svmName, sizeBytes, thin)
 	if err != nil {
 		return fmt.Errorf("Failed creating NVMe namespace: %w", err)
 	}
@@ -338,7 +341,7 @@ func (d *netapp) MountVolumeSnapshot(snapVol Volume, progressReporter ioprogress
 
 	// FlexClone the snapshot into a temporary writable FlexVol so the host can
 	// map it like any other namespace; ONTAP snapshots themselves are read-only.
-	err = d.client().createFlexClone(d.state.ShutdownCtx, tmpCloneName, flexVol.UUID, snapName)
+	err = d.client().createFlexClone(d.state.ShutdownCtx, tmpCloneName, svmName, flexVol.UUID, snapName)
 	if err != nil {
 		return fmt.Errorf("Failed creating temporary clone from snapshot: %w", err)
 	}

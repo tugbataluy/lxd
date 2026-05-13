@@ -41,13 +41,11 @@ type netappAggregate struct {
 			Available int64 `json:"available"`
 		} `json:"block_storage"`
 	} `json:"space"`
-	// SVM is populated only when the request includes svm in the fields list,
-	// e.g. via aggregates?fields=...,svm. ONTAP exposes the owning SVM on the
-	// aggregate record so callers can avoid an extra round-trip.
-	SVM struct {
+	// HomeNode is populated when the request includes home_node in the fields list.
+	// Aggregates belong to nodes in ONTAP, not to SVMs.
+	HomeNode struct {
 		Name string `json:"name"`
-		UUID string `json:"uuid"`
-	} `json:"svm"`
+	} `json:"home_node"`
 }
 
 type netappAggregateResponse struct {
@@ -174,9 +172,11 @@ func (c *netappClient) waitForJob(ctx context.Context, jobUUID string) error {
 }
 
 // getAggregate retrieves information about the specified aggregate.
+// Note: In ONTAP, aggregates belong to nodes, not SVMs. The SVM must be
+// configured separately via netapp.svm.
 func (c *netappClient) getAggregate(ctx context.Context, name string) (*netappAggregate, error) {
 	var resp netappAggregateResponse
-	path := fmt.Sprintf("/storage/aggregates?name=%s&fields=uuid,space,home_node,snapmirror_label,svm", name)
+	path := fmt.Sprintf("/storage/aggregates?name=%s&fields=uuid,space.block_storage,home_node", name)
 
 	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	if err != nil {
@@ -275,15 +275,17 @@ func (c *netappClient) deleteFlexVol(ctx context.Context, uuid string) error {
 }
 
 // createNamespace creates a new NVMe namespace inside a FlexVol.
-func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, namespaceName string, svmName string, sizeBytes int64) error {
+func (c *netappClient) createNamespace(ctx context.Context, flexvolName string, namespaceName string, svmName string, sizeBytes int64, thin bool) error {
 	req := map[string]interface{}{
 		"name": fmt.Sprintf("/vol/%s/%s", flexvolName, namespaceName),
 		"svm": map[string]string{
 			"name": svmName,
 		},
 		"space": map[string]interface{}{
-			"size":      sizeBytes,
-			"guarantee": false, // Disable space reservation (Thin provisioning)
+			"size": sizeBytes,
+			"guarantee": map[string]interface{}{
+				"requested": !thin, // Space reservation: false for thin provisioning
+			},
 		},
 		"os_type": "linux",
 	}
@@ -457,9 +459,12 @@ func (c *netappClient) restoreSnapshot(ctx context.Context, volUUID string, snap
 }
 
 // createFlexClone creates a new FlexVol cloned from an existing snapshot.
-func (c *netappClient) createFlexClone(ctx context.Context, cloneName string, parentVolUUID string, parentSnapName string) error {
+func (c *netappClient) createFlexClone(ctx context.Context, cloneName string, svmName string, parentVolUUID string, parentSnapName string) error {
 	req := map[string]interface{}{
 		"name": cloneName,
+		"svm": map[string]string{
+			"name": svmName,
+		},
 		"clone": map[string]interface{}{
 			"is_flexclone": true,
 			"parent_volume": map[string]string{
