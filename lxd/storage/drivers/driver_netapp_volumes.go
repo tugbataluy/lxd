@@ -10,11 +10,16 @@ import (
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
+	"github.com/canonical/lxd/lxd/storage/block"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
+
+// netappNVMeDiskDevicePrefix is the prefix for NVMe devices that use UUID identifiers.
+// NetApp ONTAP exposes namespaces as /dev/disk/by-id/nvme-uuid.<uuid>.
+const netappNVMeDiskDevicePrefix = "nvme-uuid."
 
 // CreateVolume creates an empty volume and can optionally fill it by executing the supplied filler function.
 func (d *netapp) CreateVolume(vol Volume, filler *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
@@ -216,13 +221,14 @@ func (d *netapp) getMappedDevPathWithCleanup(vol Volume, mapVolume bool) (string
 		revert.Add(disconnect)
 
 		// Wait for the kernel to expose the namespace as a /dev/disk/by-id entry.
-		devicePath, err = conn.WaitDiskDevicePath(d.state.ShutdownCtx, filter)
+		// NetApp uses nvme-uuid.<uuid> format, not nvme-eui.<nguid>.
+		devicePath, err = block.WaitDiskDevicePath(d.state.ShutdownCtx, netappNVMeDiskDevicePrefix, filter)
 		if err != nil {
 			return "", nil, fmt.Errorf("Failed waiting for NVMe device: %w", err)
 		}
 	} else {
 		// Expect device to be already mapped.
-		devicePath, err = conn.GetDiskDevicePath(filter)
+		devicePath, err = block.GetDiskDevicePath(netappNVMeDiskDevicePrefix, filter)
 		if err != nil {
 			return "", nil, fmt.Errorf("Failed locating device for volume %q: %w", vol.name, err)
 		}
@@ -276,11 +282,6 @@ func (d *netapp) getMappedDevPath(volName string) (string, error) {
 		return "", fmt.Errorf("Namespace %q has no UUID", nsPath)
 	}
 
-	conn, err := d.connector()
-	if err != nil {
-		return "", err
-	}
-
 	// The Linux NVMe driver uses the namespace UUID as the identifier in
 	// /dev/disk/by-id/nvme-uuid.<uuid>, lower-cased with dashes.
 	suffix := strings.ToLower(ns.UUID)
@@ -288,7 +289,7 @@ func (d *netapp) getMappedDevPath(volName string) (string, error) {
 		return strings.HasSuffix(devPath, suffix)
 	}
 
-	return conn.GetDiskDevicePath(filter)
+	return block.GetDiskDevicePath(netappNVMeDiskDevicePrefix, filter)
 }
 
 // DeleteVolume deletes an existing volume.
@@ -565,7 +566,7 @@ func (d *netapp) MountVolumeSnapshot(snapVol Volume, progressReporter ioprogress
 		return strings.HasSuffix(devPath, suffix)
 	}
 
-	_, err = conn.WaitDiskDevicePath(d.state.ShutdownCtx, filter)
+	_, err = block.WaitDiskDevicePath(d.state.ShutdownCtx, netappNVMeDiskDevicePrefix, filter)
 	if err != nil {
 		return fmt.Errorf("Failed waiting for snapshot NVMe device: %w", err)
 	}
@@ -711,7 +712,7 @@ func (d *netapp) MountVolume(vol Volume, progressReporter ioprogress.ProgressRep
 		return strings.HasSuffix(devPath, suffix)
 	}
 
-	_, err = conn.WaitDiskDevicePath(d.state.ShutdownCtx, filter)
+	_, err = block.WaitDiskDevicePath(d.state.ShutdownCtx, netappNVMeDiskDevicePrefix, filter)
 	if err != nil {
 		return fmt.Errorf("Failed waiting for NVMe device: %w", err)
 	}
