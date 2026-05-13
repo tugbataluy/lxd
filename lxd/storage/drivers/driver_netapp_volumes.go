@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/canonical/lxd/lxd/backup"
@@ -860,4 +861,107 @@ func (d *netapp) ListVolumes() ([]Volume, error) {
 	}
 
 	return volList, nil
+}
+
+// FillVolumeConfig populates volume with default config.
+func (d *netapp) FillVolumeConfig(vol Volume) error {
+	// Copy volume.* configuration options from pool.
+	// Exclude 'block.filesystem' and 'block.mount_options' as these ones are
+	// handled below in this function and depend on the volume's type.
+	err := d.fillVolumeConfig(&vol, "block.filesystem", "block.mount_options")
+	if err != nil {
+		return err
+	}
+
+	// Only validate filesystem config keys for filesystem volumes or VM block
+	// volumes (which have an associated filesystem volume).
+	if vol.ContentType() == ContentTypeFS || vol.IsVMBlock() {
+		// VM volumes will always use the default filesystem.
+		if vol.IsVMBlock() {
+			vol.config["block.filesystem"] = DefaultFilesystem
+		} else {
+			// Inherit filesystem from pool if not set.
+			if vol.config["block.filesystem"] == "" {
+				vol.config["block.filesystem"] = d.config["volume.block.filesystem"]
+			}
+
+			// Default filesystem if neither volume nor pool specify an override.
+			if vol.config["block.filesystem"] == "" {
+				vol.config["block.filesystem"] = DefaultFilesystem
+			}
+		}
+
+		// Inherit filesystem mount options from pool if not set.
+		if vol.config["block.mount_options"] == "" {
+			vol.config["block.mount_options"] = d.config["volume.block.mount_options"]
+		}
+
+		// Default filesystem mount options if neither volume nor pool specify an override.
+		if vol.config["block.mount_options"] == "" {
+			vol.config["block.mount_options"] = "discard"
+		}
+	}
+
+	return nil
+}
+
+// ValidateVolume validates the supplied volume config.
+func (d *netapp) ValidateVolume(vol Volume, removeUnknownKeys bool) error {
+	// When creating volumes from ISO images, round its size to the next multiple
+	// of 4KiB (ONTAP namespace alignment), and ensure it is at least 1MiB.
+	if vol.ContentType() == ContentTypeISO {
+		sizeBytes, err := units.ParseByteSizeString(vol.ConfigSize())
+		if err != nil {
+			return err
+		}
+
+		sizeBytes = d.roundVolumeBlockSizeBytes(vol, sizeBytes)
+		vol.SetConfigSize(strconv.FormatInt(sizeBytes, 10))
+	}
+
+	commonRules := d.commonVolumeRules()
+
+	// Disallow block.* settings for regular custom block volumes. These settings
+	// only make sense when using custom filesystem volumes. LXD will create the
+	// filesystem for these volumes, and use the mount options.
+	if vol.volType == VolumeTypeCustom && vol.contentType == ContentTypeBlock {
+		delete(commonRules, "block.filesystem")
+		delete(commonRules, "block.mount_options")
+	}
+
+	return d.validateVolume(vol, commonRules, removeUnknownKeys)
+}
+
+// UpdateVolume applies config changes to the volume.
+func (d *netapp) UpdateVolume(vol Volume, changedConfig map[string]string) error {
+	newSize, sizeChanged := changedConfig["size"]
+	if sizeChanged {
+		err := d.SetVolumeQuota(vol, newSize, false, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// GetVolumeUsage returns the disk space used by the volume.
+func (d *netapp) GetVolumeUsage(vol Volume) (int64, error) {
+	volName := d.client().getVolumeName(vol)
+	svmName := d.client().svmName
+	nsPath := fmt.Sprintf("/vol/%s/ns0", volName)
+
+	ns, err := d.client().getNamespace(d.state.ShutdownCtx, nsPath, svmName)
+	if err != nil {
+		return -1, err
+	}
+
+	return ns.Space.Size, nil
+}
+
+// roundVolumeBlockSizeBytes rounds the given size to the nearest multiple
+// of 4KiB (ONTAP namespace alignment requirement).
+func (d *netapp) roundVolumeBlockSizeBytes(_ Volume, sizeBytes int64) int64 {
+	const align = 4096
+	return (sizeBytes + align - 1) / align * align
 }
