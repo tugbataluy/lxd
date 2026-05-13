@@ -13,6 +13,7 @@ import (
 	"github.com/canonical/lxd/lxd/storage/block"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/ioprogress"
+	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
@@ -913,11 +914,79 @@ func (d *netapp) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, s
 	return genericVFSBackupUnpack(d, d.state, vol, srcBackup.Snapshots, srcData, progressReporter)
 }
 
-// CreateVolumeFromCopy creates a new volume from a copy of an existing volume.
-// The optimised FlexClone path is not yet implemented; callers fall back to the
-// generic BLOCK_AND_RSYNC migration declared by MigrationTypes.
+// CreateVolumeFromCopy creates a new volume from a copy of an existing volume
+// using ONTAP FlexClone for efficient space-saving copies.
 func (d *netapp) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, progressReporter ioprogress.ProgressReporter) error {
-	return ErrNotSupported
+	revert := revert.New()
+	defer revert.Fail()
+
+	svmName := d.client().svmName
+	volName := d.client().getVolumeName(vol.Volume)
+	srcVolName := d.client().getVolumeName(srcVol.Volume)
+
+	// Get source FlexVol.
+	var srcFlexVol *netappFlexVol
+	var srcSnapName string
+	var err error
+
+	if srcVol.IsSnapshot() {
+		// Source is a snapshot - get the parent FlexVol and use the snapshot directly.
+		srcParentVol := srcVol.GetParent()
+		srcParentName := d.client().getVolumeName(srcParentVol)
+		srcFlexVol, err = d.client().getFlexVol(d.state.ShutdownCtx, srcParentName, svmName)
+		if err != nil {
+			return fmt.Errorf("Failed getting source parent FlexVol: %w", err)
+		}
+
+		// Get the snapshot name (short name, not full path).
+		_, srcSnapName, _ = api.GetParentAndSnapshotName(srcVol.name)
+	} else {
+		// Source is a regular volume - create a temporary snapshot for cloning.
+		srcFlexVol, err = d.client().getFlexVol(d.state.ShutdownCtx, srcVolName, svmName)
+		if err != nil {
+			return fmt.Errorf("Failed getting source FlexVol: %w", err)
+		}
+
+		srcSnapName = "lxd-clone-src"
+		err = d.client().createSnapshot(d.state.ShutdownCtx, srcFlexVol.UUID, srcSnapName)
+		if err != nil {
+			return fmt.Errorf("Failed creating temporary snapshot for clone: %w", err)
+		}
+
+		revert.Add(func() { _ = d.client().deleteSnapshotByName(d.state.ShutdownCtx, srcFlexVol.UUID, srcSnapName) })
+	}
+
+	// Create FlexClone from the snapshot.
+	err = d.client().createFlexClone(d.state.ShutdownCtx, volName, svmName, srcFlexVol.UUID, srcSnapName)
+	if err != nil {
+		return fmt.Errorf("Failed creating FlexClone: %w", err)
+	}
+
+	revert.Add(func() { _ = d.DeleteVolume(vol.Volume, progressReporter) })
+
+	// For VMs, also clone the filesystem volume.
+	if vol.IsVMBlock() {
+		fsVol := NewVolumeCopy(vol.NewVMBlockFilesystemVolume())
+		srcFsVol := NewVolumeCopy(srcVol.NewVMBlockFilesystemVolume())
+
+		err := d.CreateVolumeFromCopy(fsVol, srcFsVol, allowInconsistent, progressReporter)
+		if err != nil {
+			return err
+		}
+
+		revert.Add(func() { _ = d.DeleteVolume(fsVol.Volume, progressReporter) })
+	}
+
+	// Clean up temporary snapshot if we created one.
+	if !srcVol.IsSnapshot() {
+		err = d.client().deleteSnapshotByName(d.state.ShutdownCtx, srcFlexVol.UUID, srcSnapName)
+		if err != nil {
+			d.logger.Warn("Failed cleaning up temporary clone snapshot", logger.Ctx{"err": err})
+		}
+	}
+
+	revert.Success()
+	return nil
 }
 
 // MigrateVolume sends a volume to the target host via the generic transport.

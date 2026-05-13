@@ -442,6 +442,16 @@ func (c *netappClient) deleteSnapshot(ctx context.Context, volUUID string, snapU
 	return nil
 }
 
+// deleteSnapshotByName deletes an ONTAP snapshot by name.
+func (c *netappClient) deleteSnapshotByName(ctx context.Context, volUUID string, snapName string) error {
+	snap, err := c.getSnapshot(ctx, volUUID, snapName)
+	if err != nil {
+		return err
+	}
+
+	return c.deleteSnapshot(ctx, volUUID, snap.UUID)
+}
+
 // restoreSnapshot restores a FlexVol to an ONTAP snapshot.
 func (c *netappClient) restoreSnapshot(ctx context.Context, volUUID string, snapUUID string) error {
 	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/storage/volumes/%s/snapshots/%s/actions/restore", volUUID, snapUUID), nil, nil)
