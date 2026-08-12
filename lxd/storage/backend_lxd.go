@@ -5410,6 +5410,9 @@ func (b *lxdBackend) CreateCustomVolumeFromMigration(ctx context.Context, projec
 		return errors.New("Storage pool does not support custom volume type")
 	}
 
+	// LX188 PoC: metadata-only receive onto an already mirrored, non-primary image.
+	metaOnly := shared.LX188MetaOnly()
+
 	var volumeConfig map[string]string
 
 	// Check if the volume exists in database.
@@ -5428,7 +5431,7 @@ func (b *lxdBackend) CreateCustomVolumeFromMigration(ctx context.Context, projec
 	// Check if the volume exists on storage.
 	var vol drivers.Volume
 	volStorageName := project.StorageVolume(projectName, args.Name)
-	if args.Refresh {
+	if args.Refresh || metaOnly {
 		vol = b.GetVolume(drivers.VolumeTypeCustom, drivers.ContentType(args.ContentType), volStorageName, volumeConfig)
 	} else {
 		vol = b.GetNewVolume(drivers.VolumeTypeCustom, drivers.ContentType(args.ContentType), volStorageName, volumeConfig)
@@ -5439,8 +5442,14 @@ func (b *lxdBackend) CreateCustomVolumeFromMigration(ctx context.Context, projec
 		return err
 	}
 
+	// LX188 PoC: the mirrored image must already be there, same reasoning as for instances.
+	if metaOnly && !volExists {
+		return fmt.Errorf("Metadata-only migration requires volume %q to already exist on storage", args.Name)
+	}
+
 	// Check for inconsistencies between database and storage before continuing.
-	if dbVol == nil && volExists {
+	// LX188 PoC: this is the state the first replicator run is always in.
+	if dbVol == nil && volExists && !metaOnly {
 		return errors.New("Volume already exists on storage but not in database")
 	}
 
@@ -5451,9 +5460,10 @@ func (b *lxdBackend) CreateCustomVolumeFromMigration(ctx context.Context, projec
 	// Disable refresh mode if volume doesn't exist yet.
 	// Unlike in CreateInstanceFromMigration there is no existing check for if the volume exists, so we must do
 	// it here and disable refresh mode if the volume doesn't exist.
+	// LX188 PoC: metaOnly always has the volume on storage, so it takes the create branch instead.
 	if args.Refresh && !volExists {
 		args.Refresh = false
-	} else if !args.Refresh && volExists {
+	} else if !args.Refresh && volExists && !metaOnly {
 		return errors.New("Cannot create volume, already exists on migration target storage")
 	}
 
