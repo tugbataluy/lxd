@@ -6963,6 +6963,15 @@ func (b *lxdBackend) UpdateInstanceBackupFile(inst instance.Instance, snapshots 
 		return nil
 	}
 
+	// LX188 PoC: every caller of this funnels through here, and writing the backup file mounts
+	// the volume. On a standby the image is a non-primary replica, so the map fails on a kernel
+	// feature set mismatch rather than on permissions. Suppress the write by policy, since the
+	// error is not something a caller can recognise.
+	if shared.LX188Standby() {
+		l.Debug("LX188 PoC: skipping backup file write on standby")
+		return nil
+	}
+
 	config, err := b.GenerateInstanceBackupConfig(inst, snapshots, volBackupConf, progressReporter)
 	if err != nil {
 		return fmt.Errorf("Failed generating instance config: %w", err)

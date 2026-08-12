@@ -13,3 +13,13 @@ import (
 func LX188MetaOnly() bool {
 	return os.Getenv("LXD_LX188_METAONLY") == "1"
 }
+
+// LX188Standby reports whether this daemon holds replicas rather than primaries.
+//
+// PoC ONLY, NOT FOR MERGE. This stands in for a project or pool level "this is a replica" flag.
+// It is deliberately separate from the metadata-only switch, because the leader must keep writing
+// backup files while the standby cannot write anything at all. Set LXD_LX188_STANDBY=1 on the
+// standby only.
+func LX188Standby() bool {
+	return os.Getenv("LXD_LX188_STANDBY") == "1"
+}
