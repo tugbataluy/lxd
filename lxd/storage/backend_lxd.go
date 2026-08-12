@@ -2356,10 +2356,13 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 
 	isRemoteClusterMove := args.ClusterMoveSourceName != "" && b.driver.Info().Remote
 
+	// LX188 PoC: metadata-only receive onto an already mirrored, non-primary image.
+	metaOnly := shared.LX188MetaOnly()
+
 	volStorageName := project.Instance(inst.Project().Name, inst.Name())
 
 	var vol drivers.Volume
-	if isRemoteClusterMove || args.Refresh {
+	if isRemoteClusterMove || args.Refresh || metaOnly {
 		// In case it's a cluster move don't instantiate a new volume.
 		// Instead load the existing volume and config from the database.
 		vol = b.GetVolume(volType, contentType, volStorageName, volumeConfig)
@@ -2385,8 +2388,18 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 		return err
 	}
 
+	// LX188 PoC: a metadata-only receive describes a volume Ceph has already mirrored, so the
+	// records would point at nothing if it is absent. The image name encodes the project name,
+	// so this is what a project named differently on the two clusters looks like.
+	if metaOnly && !volExists {
+		return fmt.Errorf("Metadata-only migration requires volume %q to already exist on storage", vol.Name())
+	}
+
 	// Check for inconsistencies between database and storage before continuing.
-	if dbVol == nil && volExists {
+	// LX188 PoC: this is the state the first replicator run is always in. The mirrored image
+	// exists because Ceph put it there, and there is no database row yet because creating one
+	// is the point of the run.
+	if dbVol == nil && volExists && !metaOnly {
 		return errors.New("Volume already exists on storage but not in database")
 	}
 
@@ -2405,7 +2418,10 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 	defer revert.Fail()
 
 	if !args.Refresh {
-		if volExists {
+		// LX188 PoC: a cluster move skips the record creation because the records already
+		// exist. Replication needs the opposite, so metaOnly takes the create branch even
+		// though the volume is present on storage.
+		if volExists && !metaOnly {
 			if !isRemoteClusterMove {
 				return errors.New("Cannot create volume, already exists on migration target storage")
 			}
@@ -2490,7 +2506,8 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 
 	var preFiller drivers.VolumeFiller
 
-	if !args.Refresh && !isRemoteClusterMove {
+	// LX188 PoC: the pre-filler unpacks a base image into the target volume, which is a write.
+	if !args.Refresh && !isRemoteClusterMove && !metaOnly {
 		// If the negotiated migration method is rsync and the instance's base image is
 		// already on the host then setup a pre-filler that will unpack the local image
 		// to try and speed up the rsync of the incoming volume by avoiding the need to
@@ -2571,7 +2588,9 @@ func (b *lxdBackend) CreateInstanceFromMigration(ctx context.Context, inst insta
 		return err
 	}
 
-	if !isRemoteClusterMove {
+	// LX188 PoC: on the standby this revert would delete the mirrored image that Ceph owns,
+	// so a failed metadata push must never reach it.
+	if !isRemoteClusterMove && !metaOnly {
 		revert.Add(func() { _ = b.DeleteInstance(inst, progressReporter) })
 	}
 
