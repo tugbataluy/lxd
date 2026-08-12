@@ -685,6 +685,25 @@ func (d *ceph) createVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser
 
 // CreateVolumeFromMigration creates a volume being sent via a migration.
 func (d *ceph) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, progressReporter ioprogress.ProgressReporter) error {
+	// LX188 PoC: the mirrored image is already present and non-primary, so touch no storage.
+	// The mount path is a local directory only, so creating it is safe on a read-only replica.
+	if shared.LX188MetaOnly() {
+		err := vol.EnsureMountPath()
+		if err != nil {
+			return err
+		}
+
+		if vol.IsVMBlock() {
+			fsVol := NewVolumeCopy(vol.NewVMBlockFilesystemVolume())
+			err := d.CreateVolumeFromMigration(fsVol, conn, volTargetArgs, preFiller, progressReporter)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
 	if volTargetArgs.ClusterMoveSourceName != "" {
 		err := vol.EnsureMountPath()
 		if err != nil {
@@ -1713,6 +1732,11 @@ func (d *ceph) RenameVolume(vol Volume, newVolName string, progressReporter iopr
 func (d *ceph) MigrateVolume(vol VolumeCopy, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, progressReporter ioprogress.ProgressReporter) error {
 	if volSrcArgs.ClusterMove {
 		return nil // When performing a cluster member move don't do anything on the source member.
+	}
+
+	// LX188 PoC: Ceph mirroring has already moved the data, so send nothing.
+	if shared.LX188MetaOnly() {
+		return nil
 	}
 
 	// Handle simple rsync and block_and_rsync through generic.
