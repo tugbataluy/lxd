@@ -7949,10 +7949,14 @@ func (d *qemu) MigrateReceive(ctx context.Context, args instance.MigrateReceiveA
 			}
 		}
 
+		// LX188 PoC: metadata-only receive onto an already mirrored, non-primary image.
+		metaOnly := shared.LX188MetaOnly()
+
 		// Only delete all instance volumes on error if the pool volume creation has succeeded to
 		// avoid deleting an existing conflicting volume.
+		// LX188 PoC: on the standby these volumes are Ceph's, so never delete them on error.
 		isRemoteClusterMove := args.ClusterMoveSourceName != "" && poolInfo.Remote
-		if !volTargetArgs.Refresh && !isRemoteClusterMove {
+		if !volTargetArgs.Refresh && !isRemoteClusterMove && !metaOnly {
 			revert.Add(func() {
 				snapshots, _ := d.Snapshots()
 				snapshotCount := len(snapshots)
@@ -7966,7 +7970,8 @@ func (d *qemu) MigrateReceive(ctx context.Context, args instance.MigrateReceiveA
 			})
 		}
 
-		if args.ClusterMoveSourceName != d.name {
+		// LX188 PoC: applying templates writes into the volume, which a replica cannot take.
+		if args.ClusterMoveSourceName != d.name && !metaOnly {
 			err = d.DeferTemplateApply(instance.TemplateTriggerCopy)
 			if err != nil {
 				return err
