@@ -5313,9 +5313,13 @@ func (d *lxc) MigrateReceive(ctx context.Context, args instance.MigrateReceiveAr
 
 		isRemoteClusterMove := args.ClusterMoveSourceName != "" && pool.Driver().Info().Remote
 
+		// LX188 PoC: metadata-only receive onto an already mirrored, non-primary image.
+		metaOnly := shared.LX188MetaOnly()
+
 		// Only delete all instance volumes on error if the pool volume creation has succeeded to
 		// avoid deleting an existing conflicting volume.
-		if !volTargetArgs.Refresh && !isRemoteClusterMove {
+		// LX188 PoC: on the standby these volumes are Ceph's, so never delete them on error.
+		if !volTargetArgs.Refresh && !isRemoteClusterMove && !metaOnly {
 			revert.Add(func() {
 				snapshots, _ := d.Snapshots()
 				snapshotCount := len(snapshots)
@@ -5332,15 +5336,20 @@ func (d *lxc) MigrateReceive(ctx context.Context, args instance.MigrateReceiveAr
 		// For containers, the fs map of the source is sent as part of the migration
 		// stream, then at the end we need to record that map as last_state so that
 		// LXD can shift on startup if needed.
-		err = d.resetContainerDiskIdmap(srcIdmap)
-		if err != nil {
-			return err
-		}
-
-		if args.ClusterMoveSourceName != d.name {
-			err = d.DeferTemplateApply(instance.TemplateTriggerCopy)
+		// LX188 PoC: every step below mounts or writes the volume. On the standby the image is
+		// non-primary and read only, and the lab showed the failures are a kernel feature bit
+		// mismatch rather than a permission error, so they have to be skipped by policy.
+		if !metaOnly {
+			err = d.resetContainerDiskIdmap(srcIdmap)
 			if err != nil {
 				return err
+			}
+
+			if args.ClusterMoveSourceName != d.name {
+				err = d.DeferTemplateApply(instance.TemplateTriggerCopy)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -5349,9 +5358,11 @@ func (d *lxc) MigrateReceive(ctx context.Context, args instance.MigrateReceiveAr
 		}
 
 		// Update the backup file after all mutations have completed.
-		err = d.UpdateBackupFile()
-		if err != nil {
-			return fmt.Errorf("Failed writing backup file: %w", err)
+		if !metaOnly {
+			err = d.UpdateBackupFile()
+			if err != nil {
+				return fmt.Errorf("Failed writing backup file: %w", err)
+			}
 		}
 
 		return nil
